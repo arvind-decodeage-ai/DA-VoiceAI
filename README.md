@@ -2,9 +2,10 @@
 
 Decode Age Customer Support Voice Agent — desktop prototype (no telephony).
 
-This directory is a self-contained `uv` project living inside the `DA-VoiceAI` git
-repository, on branch `feat/desktop-voice-agent`. It does not import from, depend on,
-or modify the existing `app/` (live-call/Exotel) code in this repo.
+This is a standalone `uv` project in its own git repository. It was extracted from the
+`DA-VoiceAI` repository (branch `feat/desktop-voice-agent`), where it began life as a
+self-contained subdirectory; it never imported from or depended on that repository's
+`app/` (live-call/Exotel) code, which remains a separate production pipeline.
 
 ## Milestone status
 
@@ -33,13 +34,14 @@ python agent/agent.py dev   # should log "agent ready" and stay connected to Liv
 | minio | 9000 (API), 9001 (console) | recordings/object storage (used from M7+) |
 | langfuse | 3001 | tracing (used from M7+) |
 
-> **Note:** this host already runs a native (apt) PostgreSQL 16 service on port 5432 for
-> the existing production DA-VoiceAI app. To avoid a conflict, da-voice's Postgres
-> container publishes on host port **5433** instead (internally it's still 5432, so
-> other containers on the `da-voice_default` network — e.g. langfuse — reach it at
-> `postgres:5432` unaffected). `DATABASE_URL` in `.env.example` reflects this
-> (`localhost:5433`). If you run da-voice on a host without a conflicting Postgres,
-> you can safely change the mapping back to `"5432:5432"` and drop the `5433`.
+> **Note:** this host already runs a native (apt) PostgreSQL 16 service on port 5432
+> for the separate DA-VoiceAI production app (a different project on the same host).
+> To avoid a conflict, da-voice's Postgres container publishes on host port **5433**
+> instead (internally it's still 5432, so other containers on the `da-voice_default`
+> network — e.g. langfuse — reach it at `postgres:5432` unaffected). `DATABASE_URL` in
+> `.env.example` reflects this (`localhost:5433`). If you run da-voice on a host
+> without a conflicting Postgres, you can safely change the mapping back to
+> `"5432:5432"` and drop the `5433`.
 
 `docker compose down` followed by `docker compose up -d` preserves Postgres/Redis/MinIO
 data via named volumes (`postgres_data`, `redis_data`, `minio_data`).
@@ -69,4 +71,4 @@ python agent/agent.py dev
 ## Scope
 
 M0 only. No microphone capture, STT, TTS, LLM calls, conversation agents, guardrails,
-timers, UI, or telephony. See the PRD for the full milestone plan (M1–M8).
+timers, UI, or telephony. See [`docs/PRD.md`](docs/PRD.md) for the full milestone plan (M1–M8).
