@@ -1,21 +1,26 @@
 /**
- * M2 T4: Start a call, connect to the room, two-way audio.
+ * M2: browser call UI.
  *
- * Transcript, status badge and timer arrive in T5; the End button here only
- * disconnects the browser — wiring it to DELETE /calls/{id} so the room is torn
- * down is T6. Until then a room lingers until LiveKit's empty-room timeout.
+ * T4 — Start a call, connect to the room, two-way audio.
+ * T5 — live transcript, agent-state badge, call timer.
+ *
+ * The End button still only disconnects the browser; wiring it to
+ * DELETE /calls/{id} so the room is torn down is T6.
  */
 
 import { useCallback, useState } from "react";
 import { LiveKitRoom, RoomAudioRenderer } from "@livekit/components-react";
 
 import { createCall, type CallCredentials } from "./api";
+import { StatusBar } from "./StatusBar";
+import { Transcript } from "./Transcript";
 
 type Phase = "idle" | "connecting" | "in-call";
 
 export default function App() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [creds, setCreds] = useState<CallCredentials | null>(null);
+  const [startedAt, setStartedAt] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   const start = useCallback(async () => {
@@ -23,6 +28,7 @@ export default function App() {
     setPhase("connecting");
     try {
       setCreds(await createCall());
+      setStartedAt(Date.now());
       setPhase("in-call");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -64,6 +70,8 @@ export default function App() {
           {/* Plays the agent's audio track. Without this you hear nothing. */}
           <RoomAudioRenderer />
           <section className="call">
+            <StatusBar startedAt={startedAt} />
+            <Transcript />
             <p className="call-id">call {creds.call_id}</p>
             <button className="danger" onClick={stop}>
               End call

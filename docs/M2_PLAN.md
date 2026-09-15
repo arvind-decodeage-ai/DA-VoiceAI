@@ -160,6 +160,22 @@ Note `start`, not `dev`: with explicit dispatch the worker takes assigned jobs.
   real room. If either doesn't arrive, T5 becomes an investigation rather than wiring.
 - **Dispatch change is the first edit to `agent/` since M1 closed.** T1 exists specifically to
   bound that risk before anything is built on top of it.
+- **No persistence in M2, so T7's acceptance evidence is weaker than M1's.** Nothing records
+  a browser call: Postgres stays empty by design, there is no call JSON, and the M1 harness
+  wraps `console` only — it does not see calls placed through the UI. T7 will therefore be
+  evidenced by **worker log output** rather than a harness summary, captured with the `tee`
+  redirect documented in the README:
+
+  ```bash
+  .venv/bin/python agent/agent.py start 2>&1 | tee out/worker-$(date +%Y%m%d-%H%M%S).log
+  ```
+
+  That log carries STT transcripts, LLM turns, TTS sessions and per-turn latency, which is
+  enough to evidence all five M2 criteria. It is a deliberate trade, not an oversight:
+  **durable per-call storage is M3 scope** (`CallState`, `EventLog`, `JSONBuilder`, and the
+  Postgres schema), because designing storage before M3's data shape is known would mean
+  guessing and then reshaping it. Tracked, not forgotten.
+
 - **Known platform quirk — implicit empty-name dispatch (documented behaviour, no action).**
   `create_room` implicitly creates a dispatch with an *empty* `agent_name` alongside the
   explicit one we create, e.g. for a single call:

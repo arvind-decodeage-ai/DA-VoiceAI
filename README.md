@@ -26,6 +26,18 @@ enables *explicit dispatch* — and explicit dispatch **turns off automatic disp
 | `python agent/agent.py start` | Connects to LiveKit and waits to be **assigned** a job by `POST /calls`. | M2 — the browser UI path |
 | `python agent/agent.py dev` | Same as `start` plus hot reload. | M2 development |
 
+**For M2 testing, run the worker with a log redirect.** Nothing persists a browser call yet
+— no database rows, no JSON, no harness summary (the harness wraps `console` only) — so the
+worker's stdout is the only record of what happened. Make it a file:
+
+```bash
+.venv/bin/python agent/agent.py start 2>&1 | tee out/worker-$(date +%Y%m%d-%H%M%S).log
+```
+
+That captures STT transcripts, LLM turns, TTS sessions and the per-turn latency metrics for
+every call. `out/` is gitignored, so the logs stay local. Durable per-call storage is M3
+(`CallState`, `EventLog`, `JSONBuilder`) — see [`docs/M2_PLAN.md`](docs/M2_PLAN.md).
+
 > **The trap:** because automatic dispatch is off, a worker started with `dev` or `start`
 > will log `registered worker` and then sit there doing nothing until something dispatches
 > it. That is **not** a failure — it is waiting. If you create a room by hand and expect the
