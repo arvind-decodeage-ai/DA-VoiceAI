@@ -202,7 +202,7 @@ customer's language would contradict a hard language lock.
 | T7 | `record_csat` + `end_call` | CSAT captured 1-5; `end_call` flushes TTS before close, evidenced by playout timing in the worker log |
 | T8 | Persistence + migration | `calls`/`turns`/`events`/`slots` populated for a real call and consistent with the JSON; `db/migrate.py` still safe to re-run; **and the crash-loss behaviour is tested, not just described** — a call killed mid-conversation leaves exactly one `calls` row with `status='in_progress'`, no `turns`/`events`/`slots` rows, and no `result`, proving the loss is bounded and visible rather than silent or partial |
 | T9 | `GET /calls/{id}/json` + UI viewer | JSON fetchable after End and rendered in the browser |
-| T10 | Acceptance run + `docs/M3_STATUS.md` | All criteria below evidenced from a real call, measured rather than asserted |
+| T10 | Acceptance run + `docs/M3_STATUS.md` | All criteria below evidenced from a real call, measured rather than asserted. **Must include a real microphone session with an actual barge-in**: `agent_turn.payload.interrupted = True` has only ever been unit-tested against a synthetic ChatMessage. T4's evidence run went through `console --text`, which bypasses STT and VAD, so a genuine interruption has never been observed end to end |
 
 ## Open items carried into T5 scoping
 
