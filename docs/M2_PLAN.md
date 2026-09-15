@@ -160,6 +160,21 @@ Note `start`, not `dev`: with explicit dispatch the worker takes assigned jobs.
   real room. If either doesn't arrive, T5 becomes an investigation rather than wiring.
 - **Dispatch change is the first edit to `agent/` since M1 closed.** T1 exists specifically to
   bound that risk before anything is built on top of it.
+- **Known platform quirk — implicit empty-name dispatch (documented behaviour, no action).**
+  `create_room` implicitly creates a dispatch with an *empty* `agent_name` alongside the
+  explicit one we create, e.g. for a single call:
+
+  ```
+  AD_c47xF3rVzpnw  room: c_985052df5898              <- implicit, empty agent_name
+  AD_4YM9dyHoLrJM  agent_name: "da-voice"            <- ours
+  ```
+
+  Harmless in this setup: nothing matches the empty entry and exactly one agent joins
+  (verified in T3). It would only matter if a legacy or undispatched worker — one running
+  without `agent_name` — were running concurrently, which would join through the implicit
+  dispatch and put two agents in one room. Worth remembering if doubled audio is ever
+  observed again. No code change.
+
 - **The M1 dropped-turn bug is unresolved.** It did not reproduce in the M1 acceptance run and
   is not an M2 blocker, but if it surfaces during M2 testing it will look like a UI hang. The
   harness stage probes remain available to identify it.
