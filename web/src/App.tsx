@@ -4,18 +4,19 @@
  * T4 — Start a call, connect to the room, two-way audio.
  * T5 — live transcript, agent-state badge, call timer.
  *
- * The End button still only disconnects the browser; wiring it to
- * DELETE /calls/{id} so the room is torn down is T6.
+ * T6 — End tears the call down: the browser leaves the room first, then the
+ *      frontend calls DELETE /calls/{id} so the room is deleted and the worker's
+ *      job ends. State returns to Start call.
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { LiveKitRoom, RoomAudioRenderer } from "@livekit/components-react";
 
-import { createCall, type CallCredentials } from "./api";
+import { createCall, endCall, type CallCredentials } from "./api";
 import { StatusBar } from "./StatusBar";
 import { Transcript } from "./Transcript";
 
-type Phase = "idle" | "connecting" | "in-call";
+type Phase = "idle" | "connecting" | "in-call" | "ending";
 
 export default function App() {
   const [phase, setPhase] = useState<Phase>("idle");
@@ -23,11 +24,21 @@ export default function App() {
   const [startedAt, setStartedAt] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
+  // The disconnect handler fires from inside LiveKitRoom, where a state value
+  // captured at render time may be stale, so the call id is mirrored in a ref.
+  const callIdRef = useRef<string | null>(null);
+  // onDisconnected can fire more than once (End click, then unmount). The room
+  // teardown is idempotent server-side, but there is no reason to send it twice.
+  const teardownRef = useRef(false);
+
   const start = useCallback(async () => {
     setError(null);
     setPhase("connecting");
     try {
-      setCreds(await createCall());
+      const next = await createCall();
+      callIdRef.current = next.call_id;
+      teardownRef.current = false;
+      setCreds(next);
       setStartedAt(Date.now());
       setPhase("in-call");
     } catch (e) {
@@ -36,35 +47,57 @@ export default function App() {
     }
   }, []);
 
-  const stop = useCallback(() => {
-    // T6 will also call DELETE /calls/{id} here.
+  /** End click: stop the media first. Teardown follows in onDisconnected. */
+  const requestEnd = useCallback(() => {
+    setPhase("ending"); // flips LiveKitRoom's connect prop to false
+  }, []);
+
+  /**
+   * Runs once the browser has actually left the room — so the order is always
+   * disconnect, then DELETE, never the reverse. Also covers disconnects we did
+   * not initiate (agent left, room deleted elsewhere, network drop), which is
+   * why the DELETE is idempotent server-side.
+   */
+  const handleDisconnected = useCallback(async () => {
+    const callId = callIdRef.current;
+    callIdRef.current = null;
     setCreds(null);
     setPhase("idle");
+
+    if (!callId || teardownRef.current) return;
+    teardownRef.current = true;
+    try {
+      await endCall(callId);
+    } catch (e) {
+      // The UI is already back at Start; surface it so an orphaned room is visible
+      // rather than silent.
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }, []);
 
   return (
     <main className="app">
       <header>
-        <h1>Decode Age — Voice Support</h1>
-        <p className="sub">M2 · browser call via LiveKit</p>
+        <h1>Decode Age - Voice Support</h1>
+        <p className="sub">Browser call via LiveKit</p>
       </header>
 
       {error && <p className="error">{error}</p>}
 
-      {phase !== "in-call" && (
+      {phase !== "in-call" && phase !== "ending" && (
         <button className="primary" onClick={start} disabled={phase === "connecting"}>
           {phase === "connecting" ? "Connecting…" : "Start call"}
         </button>
       )}
 
-      {phase === "in-call" && creds && (
+      {(phase === "in-call" || phase === "ending") && creds && (
         <LiveKitRoom
           serverUrl={creds.url}
           token={creds.token}
-          connect={true}
+          connect={phase === "in-call"}
           audio={true}
           video={false}
-          onDisconnected={stop}
+          onDisconnected={handleDisconnected}
           onError={(e) => setError(e.message)}
         >
           {/* Plays the agent's audio track. Without this you hear nothing. */}
@@ -73,8 +106,8 @@ export default function App() {
             <StatusBar startedAt={startedAt} />
             <Transcript />
             <p className="call-id">call {creds.call_id}</p>
-            <button className="danger" onClick={stop}>
-              End call
+            <button className="danger" onClick={requestEnd} disabled={phase === "ending"}>
+              {phase === "ending" ? "Ending…" : "End call"}
             </button>
           </section>
         </LiveKitRoom>

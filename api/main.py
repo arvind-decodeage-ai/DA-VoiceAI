@@ -171,11 +171,20 @@ async def create_call() -> CreateCallResponse:
 async def end_call(call_id: str) -> None:
     """Delete the room. The worker's job ends when the room goes away.
 
-    Idempotent: deleting an unknown or already-deleted room is not an error, so the
-    browser's End button can always be pressed without special-casing.
+    Idempotent by design, because the browser's End button races with everything else
+    that can remove a room first — LiveKit reaping it once empty, a double click, or a
+    previous End that already succeeded. LiveKit's delete_room raises
+    ServerError(code="not_found", status=404) in that case; we treat it as success, so
+    End always leaves the caller in the same state: room gone, 204.
     """
     try:
         await app.state.lkapi.room.delete_room(api.DeleteRoomRequest(room=call_id))
+    except api.ServerError as e:
+        if getattr(e, "code", None) == "not_found" or getattr(e, "status", None) == 404:
+            logger.info("room %s already gone; treating delete as success", call_id)
+        else:
+            logger.exception("failed to delete room %s", call_id)
+            raise HTTPException(status_code=502, detail=f"livekit delete_room failed: {e}") from e
     except Exception as e:  # noqa: BLE001
         logger.exception("failed to delete room %s", call_id)
         raise HTTPException(status_code=502, detail=f"livekit delete_room failed: {e}") from e
