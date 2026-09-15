@@ -7,3 +7,6 @@ uv.lock.bak
 out/*.json
 !out/.gitkeep
 .DS_Store
+docs/
+out/
+tools/__pycache__/
