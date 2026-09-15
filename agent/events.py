@@ -45,6 +45,13 @@ class EventType(str, Enum):
     GUARDRAIL_HIT = "guardrail_hit"
 
 
+# Turn-bearing events: the ones that represent somebody actually speaking, and
+# therefore the ones that carry a turn_idx. Everything else (slot_set,
+# agent_handoff, tool_call, ...) happens *within* or *between* turns and leaves
+# turn_idx unset.
+TURN_EVENT_TYPES = frozenset({EventType.USER_TURN, EventType.AGENT_TURN})
+
+
 M3_EVENT_TYPES = frozenset(
     {
         EventType.CALL_STARTED,
@@ -74,6 +81,12 @@ class Event(BaseModel):
     seq: int
     ts: datetime
     type: EventType
+    #: Conversation-turn number, assigned by the log to turn-bearing events
+    #: only; None for everything else. Coarser than ``seq``: one turn can emit
+    #: several events (a user_turn plus the slot_set it produced). PRD §8's
+    #: qa[] entries carry both a question and an answer under a single
+    #: turn_idx, so this indexes an exchange, not an event.
+    turn_idx: int | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -88,6 +101,7 @@ class EventLog:
 
     def __init__(self) -> None:
         self._events: list[Event] = []
+        self._turn_count = 0
 
     def append(self, type: EventType, payload: Mapping[str, Any] | None = None) -> Event:
         """Record an event and return it.
@@ -97,17 +111,39 @@ class EventLog:
         backwards, and the whole point of the log is that its order is not open
         to interpretation. The first event has ``seq == 1``.
 
+        Turn-bearing events (``user_turn``, ``agent_turn``) also get a
+        ``turn_idx``, likewise assigned here. Turn numbering lives in the log
+        and nowhere else: CallState, the JSON document and the database rows
+        all read these numbers rather than each counting turns for themselves,
+        which is the only way three projections of one log stay in agreement.
+
         The payload is deep-copied, so a caller that reuses or later mutates the
         dict it passed cannot change what was recorded.
         """
+        # Validate the type before advancing the turn counter, so a rejected
+        # append leaves no gap in the turn numbering.
+        type = EventType(type)
+
+        turn_idx = None
+        if type in TURN_EVENT_TYPES:
+            turn_idx = self._turn_count + 1
+
         event = Event(
             seq=len(self._events) + 1,
             ts=datetime.now(timezone.utc),
             type=type,
+            turn_idx=turn_idx,
             payload=copy.deepcopy(dict(payload)) if payload is not None else {},
         )
+        if turn_idx is not None:
+            self._turn_count = turn_idx
         self._events.append(event)
         return event
+
+    @property
+    def turn_count(self) -> int:
+        """Number of turn-bearing events appended so far."""
+        return self._turn_count
 
     @property
     def events(self) -> tuple[Event, ...]:

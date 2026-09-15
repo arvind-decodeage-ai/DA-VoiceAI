@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 from events import (  # noqa: E402
     M3_EVENT_TYPES,
     RESERVED_EVENT_TYPES,
+    TURN_EVENT_TYPES,
     Event,
     EventLog,
     EventType,
@@ -122,7 +123,7 @@ def test_rebinding_the_events_view_does_not_touch_the_log():
 def test_log_exposes_no_mutating_methods():
     """Guard against an update/delete path being added later by accident."""
     public = {name for name in dir(EventLog) if not name.startswith("_")}
-    assert public == {"append", "events"}
+    assert public == {"append", "events", "turn_count"}
 
 
 def test_payload_is_copied_so_later_caller_mutation_cannot_rewrite_history():
@@ -189,7 +190,7 @@ def test_reserved_types_are_valid_but_have_no_producer_in_m3():
 
 def test_unknown_type_is_rejected():
     log = EventLog()
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValueError):  # pydantic's ValidationError is a ValueError
         log.append("not_a_real_event_type")  # type: ignore[arg-type]
     assert len(log) == 0
 
@@ -197,3 +198,68 @@ def test_unknown_type_is_rejected():
 def test_payload_defaults_to_empty_dict():
     log = EventLog()
     assert log.append(EventType.CALL_STARTED).payload == {}
+
+
+# --------------------------------------------------------------------------
+# turn_idx — conversation-turn numbering, owned by the log
+# --------------------------------------------------------------------------
+
+
+def test_only_turn_bearing_events_carry_a_turn_idx():
+    log = EventLog()
+    started = log.append(EventType.CALL_STARTED)
+    user = log.append(EventType.USER_TURN, {"text": "hi"})
+    slot = log.append(EventType.SLOT_SET, {"slot": "name"})
+    agent = log.append(EventType.AGENT_TURN, {"text": "hello"})
+
+    assert started.turn_idx is None
+    assert slot.turn_idx is None
+    assert user.turn_idx == 1
+    assert agent.turn_idx == 2
+
+
+def test_turn_idx_is_coarser_than_seq():
+    """One turn can emit several events; seq counts events, turn_idx exchanges."""
+    log = EventLog()
+    log.append(EventType.USER_TURN, {"text": "my order is late"})
+    log.append(EventType.SLOT_SET, {"slot": "issue_type"})
+    log.append(EventType.SLOT_SET, {"slot": "order_id"})
+    log.append(EventType.AGENT_TURN, {"text": "got it"})
+
+    assert [e.seq for e in log.events] == [1, 2, 3, 4]
+    assert [e.turn_idx for e in log.events] == [1, None, None, 2]
+    assert log.turn_count == 2
+
+
+def test_turn_idx_increments_contiguously_across_interleaved_events():
+    log = EventLog()
+    for i in range(3):
+        log.append(EventType.USER_TURN, {"i": i})
+        log.append(EventType.SLOT_SET, {"i": i})
+        log.append(EventType.AGENT_TURN, {"i": i})
+
+    turns = [e.turn_idx for e in log.events if e.turn_idx is not None]
+    assert turns == [1, 2, 3, 4, 5, 6]
+
+
+def test_rejected_append_does_not_consume_a_turn_number():
+    log = EventLog()
+    log.append(EventType.USER_TURN)
+    with pytest.raises(ValueError):
+        log.append("nonsense")  # type: ignore[arg-type]
+    assert log.append(EventType.AGENT_TURN).turn_idx == 2  # no gap
+    assert log.turn_count == 2
+
+
+def test_turn_count_starts_at_zero_and_tracks_turn_events_only():
+    log = EventLog()
+    assert log.turn_count == 0
+    log.append(EventType.CALL_STARTED)
+    assert log.turn_count == 0
+    log.append(EventType.USER_TURN)
+    assert log.turn_count == 1
+
+
+def test_turn_event_types_are_the_two_speaking_events():
+    assert TURN_EVENT_TYPES == {EventType.USER_TURN, EventType.AGENT_TURN}
+    assert TURN_EVENT_TYPES <= M3_EVENT_TYPES

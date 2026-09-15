@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import logging
 import statistics
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
 from livekit.agents.voice.events import (
     AgentStateChangedEvent,
+    ConversationItemAddedEvent,
     UserInputTranscribedEvent,
     UserStateChangedEvent,
 )
@@ -37,6 +39,7 @@ from livekit.plugins.sarvam import STTRealtime
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from config import get_settings
+from events import EventLog, EventType
 
 load_dotenv()
 
@@ -53,6 +56,39 @@ LANGUAGE_MATCH_INSTRUCTION = (
     "Always reply in the same language the customer just used. If the customer spoke "
     "in Hindi, reply in Hindi. If the customer spoke in English, reply in English."
 )
+
+
+def turn_event_for_item(
+    item: object, *, language: str | None, spoken_at: str | None
+) -> tuple[EventType, dict] | None:
+    """Map a conversation item to the turn event it should produce.
+
+    Returns None for items that are not turns (agent handoffs and any other
+    item kind), so the caller appends nothing.
+
+    `interrupted` is read straight off the ChatMessage rather than inferred
+    later. The framework commits only the text that actually reached the
+    customer (`forwarded_text`, agent_activity.py:3613) and stamps the message
+    with whether a barge-in cut it short; that flag is gone once the item has
+    passed, so if the log does not capture it here, no consumer can recover it.
+
+    Note what it does NOT cover: a reply truncated by a mid-generation LLM
+    failure commits with interrupted=False, because nothing interrupted it —
+    the stream simply closed. Recording those is an open item for T5 scoping.
+    """
+    role = getattr(item, "role", None)
+    if role == "user":
+        return EventType.USER_TURN, {
+            "text": getattr(item, "text_content", None) or "",
+            "language": language,
+        }
+    if role == "assistant":
+        return EventType.AGENT_TURN, {
+            "text": getattr(item, "text_content", None) or "",
+            "interrupted": bool(getattr(item, "interrupted", False)),
+            "spoken_at": spoken_at,
+        }
+    return None
 
 
 class TurnMetrics:
@@ -123,6 +159,7 @@ class TurnMetrics:
 
 async def entrypoint(ctx: JobContext) -> None:
     settings = get_settings()
+    event_log = EventLog()
     await ctx.connect()
 
     session = AgentSession(
@@ -194,8 +231,46 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_user_input_transcribed(ev: UserInputTranscribedEvent) -> None:
         if ev.is_final and ev.language and session.tts is not None:
             session.tts.update_options(target_language_code=ev.language)
+        if ev.is_final:
+            # Stashed for the user_turn event below. conversation_item_added is
+            # the single producer of turn events (so each turn is logged exactly
+            # once), but it carries no language, and this does.
+            last_final_language["value"] = ev.language
 
     session.on("user_input_transcribed", _on_user_input_transcribed)
+
+    # --- EventLog wiring (M3 T4) -------------------------------------------
+    #
+    # conversation_item_added is the sole producer of turn events. It fires once
+    # per item committed to the chat context, for both roles, which is what
+    # "exactly once per turn" requires; user_input_transcribed also fires per
+    # user turn, so using both would double-count every user turn.
+    #
+    # The M2 investigation found that an interrupted assistant reply is only
+    # committed when the NEXT turn commits, so agent_turn events can reach the
+    # log after the user turn that interrupted them. The log records arrival
+    # order faithfully; spoken_at carries when the audio actually began, so
+    # JSONBuilder can order the transcript by speech rather than by commit.
+    last_final_language: dict[str, str | None] = {"value": None}
+    last_spoke_at: dict[str, str | None] = {"value": None}
+
+    def _on_agent_state_for_log(ev: AgentStateChangedEvent) -> None:
+        if ev.new_state == "speaking":
+            last_spoke_at["value"] = datetime.fromtimestamp(
+                ev.created_at, tz=timezone.utc
+            ).isoformat()
+
+    def _on_conversation_item_added(ev: ConversationItemAddedEvent) -> None:
+        mapped = turn_event_for_item(
+            ev.item,
+            language=last_final_language["value"],
+            spoken_at=last_spoke_at["value"],
+        )
+        if mapped is not None:
+            event_log.append(*mapped)
+
+    session.on("agent_state_changed", _on_agent_state_for_log)
+    session.on("conversation_item_added", _on_conversation_item_added)
 
     metrics = TurnMetrics()
     session.on("user_state_changed", metrics.on_user_state_changed)
@@ -204,11 +279,27 @@ async def entrypoint(ctx: JobContext) -> None:
     async def _report_metrics() -> None:
         metrics.report()
 
+    async def _close_event_log() -> None:
+        event_log.append(EventType.CALL_ENDED)
+        logger.info(
+            "[eventlog] %d events, %d turns", len(event_log), event_log.turn_count
+        )
+        for event in event_log:
+            logger.info(
+                "[eventlog] seq=%d turn=%s %s %s",
+                event.seq,
+                event.turn_idx,
+                event.type.value,
+                event.payload,
+            )
+
     ctx.add_shutdown_callback(_report_metrics)
+    ctx.add_shutdown_callback(_close_event_log)
 
     agent = Agent(instructions=f"{BASE_PERSONA}\n\n{LANGUAGE_MATCH_INSTRUCTION}")
 
     await session.start(agent=agent, room=ctx.room)
+    event_log.append(EventType.CALL_STARTED, {"room": ctx.room.name})
     logger.info("agent ready")
 
 

@@ -204,6 +204,36 @@ customer's language would contradict a hard language lock.
 | T9 | `GET /calls/{id}/json` + UI viewer | JSON fetchable after End and rendered in the browser |
 | T10 | Acceptance run + `docs/M3_STATUS.md` | All criteria below evidenced from a real call, measured rather than asserted |
 
+## Open items carried into T5 scoping
+
+Both surfaced during T4 verification, when a real console call hit a Groq ITPM
+429 mid-generation. Recorded here rather than resolved, so T5 scopes them
+deliberately.
+
+**1. No event type covers a silent mid-generation failure.** When an LLM stream
+dies part-way, the framework commits the text that was actually spoken
+(`forwarded_text`, `agent_activity.py:3613`) and stamps the message
+`interrupted=speech_handle.interrupted` — which is **False**, because nothing
+interrupted it: `perform_llm_inference` closes the text channel when the task
+ends, the segment loop sees `ChanClosed`, and the reply exits along its normal
+path. The turn is therefore logged as an ordinary completed `agent_turn` holding
+a truncated sentence, and the error itself is swallowed by
+`AgentSession._on_error` for the first `max_unrecoverable_errors` occurrences.
+None of the seven M3 types fit this, and neither reserved type does either
+(`tool_call` and `guardrail_hit` mean something else). Adding a type is a
+log-shape decision, so it is deferred rather than assumed.
+
+T4 captures what *is* knowable at commit time: `agent_turn.payload.interrupted`,
+read off the ChatMessage. That distinguishes barge-in truncation, and it had to
+be captured there because the flag is unrecoverable afterwards. It does **not**
+cover the failure case above.
+
+**2. An unpaired `user_turn` before `call_ended` is a legitimate shape.** LLM
+failure, a crash, a disconnect and a plain hangup all produce a final user turn
+with no answer, so JSONBuilder must not assume turns pair up. Proposed rule, to
+be confirmed in T5: do not synthesise an empty `qa[]` entry; surface it through
+§8's `resolution.status`, whose enum already contains `abandoned`.
+
 ## Acceptance criteria / evidence
 
 1. **Schema** — the produced JSON validates against the PRD §8 schema, machine-checked.
