@@ -9,8 +9,28 @@ self-contained subdirectory; it never imported from or depended on that reposito
 
 ## Milestone status
 
-- **M0 — Environment**: infrastructure, config, skeleton, DB migration. No STT/TTS/LLM/
-  conversation logic yet (that starts at M1).
+- **M0 — Environment**: infrastructure, config, skeleton, DB migration. Done.
+- **M1 — Voice round trip**: single agent, no tools, Sarvam STT/TTS + LLM, barge-in.
+  Closed 2026-09-15 by deliberate risk acceptance — see [`docs/M1_STATUS.md`](docs/M1_STATUS.md).
+- **M2 — UI + dispatch**: React UI and FastAPI `POST /calls`. In progress — see
+  [`docs/M2_PLAN.md`](docs/M2_PLAN.md).
+
+## Running the agent: `console` vs `start` vs `dev`
+
+**Read this before running the worker.** The worker sets `agent_name="da-voice"`, which
+enables *explicit dispatch* — and explicit dispatch **turns off automatic dispatch**.
+
+| Command | What it does | Use it for |
+|---|---|---|
+| `python agent/agent.py console` | Runs the agent locally against your mic and speakers. No LiveKit room, no dispatch. | M1 testing, the quickest way to talk to the agent |
+| `python agent/agent.py start` | Connects to LiveKit and waits to be **assigned** a job by `POST /calls`. | M2 — the browser UI path |
+| `python agent/agent.py dev` | Same as `start` plus hot reload. | M2 development |
+
+> **The trap:** because automatic dispatch is off, a worker started with `dev` or `start`
+> will log `registered worker` and then sit there doing nothing until something dispatches
+> it. That is **not** a failure — it is waiting. If you create a room by hand and expect the
+> agent to join on its own, it will not. Either call `POST /calls` (which dispatches it), or
+> use `console` if you just want to talk to the agent.
 
 ## M0 setup
 
@@ -20,9 +40,12 @@ cp .env.example .env        # fill in SARVAM_API_KEY / OPENROUTER_API_KEY later;
 uv sync
 docker compose up -d
 docker compose ps           # all 5 services should report healthy
-python db/migrate.py        # creates calls, turns, events, slots tables
-python agent/agent.py dev   # should log "agent ready" and stay connected to LiveKit
+python db/migrate.py            # creates calls, turns, events, slots tables
+python agent/agent.py console   # talk to the agent locally (M1 path)
 ```
+
+> `console` is the command to use here. `dev`/`start` connect to LiveKit but will idle
+> until dispatched — see the section above.
 
 ## Services (docker-compose.yml)
 
@@ -65,7 +88,7 @@ docker compose up -d
 docker compose ps
 uv sync
 python db/migrate.py
-python agent/agent.py dev
+python agent/agent.py console   # not `dev` — see "Running the agent" above
 ```
 
 ## Scope

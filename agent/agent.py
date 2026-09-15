@@ -217,6 +217,13 @@ if __name__ == "__main__":
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
+            # M2: explicit dispatch. The API's POST /calls creates the room and calls
+            # AgentDispatchService.create_dispatch(room, agent_name) to place this worker
+            # in it. Setting agent_name DISABLES automatic dispatch, so a worker started
+            # with `dev` no longer joins rooms on its own — it only takes assigned jobs,
+            # which is why M2 runs it with `start`. `console` is unaffected: it simulates
+            # a job locally rather than receiving a dispatch, so the M1 path is unchanged.
+            agent_name="da-voice",
             ws_url=settings.livekit_url,
             api_key=settings.livekit_api_key,
             api_secret=settings.livekit_api_secret,
