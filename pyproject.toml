@@ -6,11 +6,13 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "livekit-agents[sarvam,openai,silero,turn-detector]",
+    "fastapi",
     "openai",
     "psycopg[binary]",
     "pydantic",
     "pydantic-settings",
     "redis",
+    "uvicorn[standard]",
     "langfuse",
     "python-dotenv",
 ]
