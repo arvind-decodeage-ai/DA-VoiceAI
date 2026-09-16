@@ -203,7 +203,7 @@ customer's language would contradict a hard language lock.
 | T6 | Greet/Wrap agents, prompts, gated handoff | **Implementation complete; live LLM handoff acceptance blocked by the current Groq ITPM ceiling.** The gate is unit-tested in both directions (refusal with slots open, refusal naming only the missing slot, success once resolved, one `agent_handoff` logged) — but no live run has yet had an LLM decide to call `move_to_wrap`. Two attempts produced zero tool calls: each request costs ~4,360 input tokens against a 7,000 ITPM limit, so retries exhaust the window and the exhausted LLM task terminated the session. That is open item 1's silent mid-generation failure, reproduced. Unblocking it is an infrastructure decision, not T6 work |
 | T7 | `record_csat` + `end_call` | Unit coverage complete. **Live verification: not yet run — pending model swap (D7).** Both are tools, so neither can execute on the current tier. CSAT captured 1-5; `end_call` flushes TTS before close, to be evidenced by playout timing in the worker log once live runs are possible |
 | T8 | Persistence + migration | **Live verification: not yet run — pending model swap (D7).** `calls`/`turns`/`events`/`slots` populated for a real call and consistent with the JSON; `db/migrate.py` still safe to re-run; **and the crash-loss behaviour is tested, not just described** — a call killed mid-conversation leaves exactly one `calls` row with `status='in_progress'`, no `turns`/`events`/`slots` rows, and no `result`, proving the loss is bounded and visible rather than silent or partial |
-| T9 | `GET /calls/{id}/json` + UI viewer | JSON fetchable after End and rendered in the browser. **Live verification: not yet run — pending model swap (D7)** — a call has to reach `end_call` to produce a document |
+| T9 | `./out/<call_id>.json` + `GET /calls/{id}/json` + UI viewer | **Writes the §8 document to `./out/<call_id>.json` at the same point `calls.result` is persisted**, from the one document object already built, so the two can never hold different content. PRD M3 requires both ("JSON written to ./out/ and viewable in UI") and T8 delivered only the database half. Then `GET /calls/{id}/json` serves it and the browser renders it after End. **Live verification: not yet run — pending model swap (D7)** — a call has to reach `end_call` to produce a document |
 | T10 | Acceptance run + `docs/M3_STATUS.md` | **BLOCKED until the model/tier swap (D7), not merely slowed.** T10 is a real paced conversation by definition, and a tool-calling turn cannot complete on the current tier — so M3's finish line is blocked, not just its pace. When T10 does run: all criteria below evidenced from a real call, measured rather than asserted. **Must include a real microphone session with an actual barge-in**: `agent_turn.payload.interrupted = True` has only ever been unit-tested against a synthetic ChatMessage. T4's evidence run went through `console --text`, which bypasses STT and VAD, so a genuine interruption has never been observed end to end |
 
 ## Open items carried into T5 scoping
@@ -264,6 +264,17 @@ therefore leaves `resolution.status` unset in that case and records the answer i
 §8 should gain a sixth value (`unresolved`) is a schema decision, deferred rather
 than invented.
 
+**4. `agent/agent.py` and the `agent/` package share a name.** `import agent`
+resolves to whichever comes first on `sys.path`: with `agent/` ahead it finds the
+module file, which shadows the package and breaks `from agent.config import ...`
+in `api/main.py`. It surfaced in T9 as a test suite that passed per-file and
+failed as a whole. Contained for now in `tests/test_call_json_api.py`'s `client`
+fixture, which swaps the binding and restores it — the reasoning is in that
+fixture's docstring, which is committed. The real fix is renaming `agent/agent.py`
+to something like `entrypoint.py` or `worker.py`, which touches M1/T4/T6/T7 files,
+the README and every documented command, so it wants doing deliberately rather
+than as a side effect. Not now; just not lost.
+
 ## Live-only risks awaiting the model swap
 
 Behaviours that unit tests cannot reach, logged as they surface so they are
@@ -308,6 +319,15 @@ Each needs checking in the first live run after the swap.
   attempted as part of any task: switching model or provider (an OpenRouter
   migration is planned but deliberately not immediate), shrinking the persona,
   changing rate-limit configuration, and changing the retry/error architecture.
+
+- **The `./out/` file and `calls.result` are written together but not atomically (T9).**
+  Both come from the same document object in the same function, so their *content*
+  cannot diverge. Their *existence* can: a filesystem error after the transaction
+  commits leaves the row without the file, and a process killed between the two
+  leaves the same. The database is the source of truth and `GET /calls/{id}/json`
+  reads from it, so the file is a convenience copy — a missing one is a missing
+  artifact, never a wrong one. Writing the file first was rejected: it would leave
+  a file describing a call the database never recorded.
 
 - **A crash mid-call loses that call's turns** — the accepted trade-off of end-of-call
   persistence, above. The `in_progress` row makes the loss visible rather than silent.
