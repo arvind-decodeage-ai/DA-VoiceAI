@@ -48,6 +48,20 @@ class ResolutionStatus(str, Enum):
     TIMEOUT = "timeout"
 
 
+class Stage(str, Enum):
+    """Where the call is in the conversation flow (PRD §5).
+
+    Added in T6, when the Greet -> Wrap machine first needed it. ROUTE and
+    RESOLVE are declared but have no producer until M4/M5, for the same reason
+    the resolve-stage slot schemas are declared: the shape settles once.
+    """
+
+    GREET = "greet"
+    ROUTE = "route"
+    RESOLVE = "resolve"
+    WRAP = "wrap"
+
+
 class SlotStatus(str, Enum):
     """Distinguishes "not yet asked" from "asked, customer had nothing to give".
 
@@ -260,6 +274,8 @@ class CallState(BaseModel):
     current_language: Optional[str] = None
     languages_seen: list[str] = Field(default_factory=list)
 
+    stage: Stage = Stage.GREET
+
     caller: Caller = Field(default_factory=Caller)
     greet: GreetSlots = Field(default_factory=GreetSlots)
     router: RouterSlots = Field(default_factory=RouterSlots)
@@ -312,6 +328,32 @@ class CallState(BaseModel):
                 )
             self.intents_handled.append(intent)
         self.active_intent = intent
+
+    def stage_slots(self) -> Optional[StageSlots]:
+        """The slot container gating the current stage, if it has one."""
+        if self.stage is Stage.GREET:
+            return self.greet
+        if self.stage is Stage.ROUTE:
+            return self.router
+        if self.stage is Stage.RESOLVE:
+            return self.active_slots()
+        return None  # WRAP is terminal: nothing gates leaving it
+
+    def can_leave_stage(self) -> bool:
+        """The single gate predicate (PRD §5, "enforced in code, not the prompt").
+
+        One function so M4 extends it for route and resolve rather than each
+        agent inventing its own rule. WRAP is terminal, so it is always True.
+        """
+        slots = self.stage_slots()
+        if slots is None:
+            return self.stage is Stage.WRAP
+        return slots.is_complete()
+
+    def blocking_slots(self) -> list[str]:
+        """Which slots are still holding the current stage open."""
+        slots = self.stage_slots()
+        return slots.unresolved_fields() if slots is not None else []
 
     def active_slots(self) -> Optional[StageSlots]:
         if self.active_intent is None:
