@@ -519,6 +519,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "langfuse" },
     { name = "livekit-agents", extra = ["openai", "sarvam", "silero", "turn-detector"] },
     { name = "openai" },
@@ -539,6 +540,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "langfuse" },
     { name = "livekit-agents", extras = ["sarvam", "openai", "silero", "turn-detector"] },
     { name = "openai" },
