@@ -254,6 +254,35 @@ here.
 
 ## Risks
 
+- **Standing constraint: the Groq ITPM ceiling paces every live run.** Not a one-time
+  blocker to solve — a condition every live verification must work within, through
+  T6's remainder, T7 and the T10 acceptance run.
+
+  Measured 2026-09-16: the limit is **7,000 input tokens per minute**
+  (organization-level, service tier `on_demand`) and one request costs **~4,360
+  input tokens** — the ~4,000-token persona plus tool definitions plus history. Two
+  requests cannot share a minute, and there is no headroom for a single retry. When
+  retries exhaust, the LLM task errors and `AgentSession._on_error` eventually
+  terminates the session; two T6 verification attempts died exactly this way,
+  producing zero tool calls.
+
+  **Therefore: any live console or microphone verification must either be paced at
+  105s+ between turns, or be run by a human at the keyboard rather than scripted.**
+  A script typing on a fixed timer will saturate the window and kill the session.
+  Allow a cold window (2+ minutes of no Groq traffic) before starting, and abort on
+  the first 429 rather than letting retries burn the budget.
+
+  Prompt caching does not help. It is automatic on Groq and cached tokens are
+  excluded from rate limits, but it is supported only on GPT-OSS 20B/120B and
+  GPT-OSS-Safeguard 20B — not on `qwen/qwen3.8-27b`. Those are also the models M1
+  ruled out for emitting tool-call-shaped output with no tools registered, which is
+  precisely what M3's gate depends on.
+
+  Four workarounds are **parked pending explicit approval** and must not be
+  attempted as part of any task: switching model or provider (an OpenRouter
+  migration is planned but deliberately not immediate), shrinking the persona,
+  changing rate-limit configuration, and changing the retry/error architecture.
+
 - **A crash mid-call loses that call's turns** — the accepted trade-off of end-of-call
   persistence, above. The `in_progress` row makes the loss visible rather than silent.
 - **§8 fields owned by later milestones** — `compliance_flags`, `guardrail_events`
