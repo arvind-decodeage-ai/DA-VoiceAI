@@ -37,6 +37,12 @@ class GreetAgent(Agent):
         Args:
             name: The customer's name, exactly as they said it.
         """
+        # One live call (c_1becfed0f253, 2026-09-16) finished with empty slots
+        # and no sign of this tool firing; not reproduced since, and
+        # c_fe37d4dde720 captured the name correctly. That run predated
+        # LK_OPENAI_DEBUG so no request payload exists, and isolated probes
+        # found the schema, model, streaming and token cap all working.
+        # Unresolved and inconclusive rather than fixed.
         state = ctx.userdata
         state.greet.name = Slot.fill(name)
         state.caller.name = state.greet.name.value

@@ -5,10 +5,22 @@ ends the call. Wrap is the terminal stage: nothing gates leaving it, so
 ``end_call`` is deliberately not slot-gated the way the Greet handoff is —
 PRD §5 gives Wrap the exit condition "end_call fired", nothing more.
 
-Live verification of both tools is deferred (M3 plan D7): a tool-calling turn
-needs two LLM requests within seconds, which the current Groq ITPM ceiling
-cannot serve. Everything here is unit-tested; none of it has executed against
-a live model.
+KNOWN M3 LIMITATION — these tools are reachable but unreached in a realistic
+call. M3 implements only Greet -> Wrap; PRD §5's Router and Resolve stages are
+M4/M5. So the handoff fires as soon as Greet's slots fill, and any customer who
+actually wants help lands in the closing agent, because there is nowhere else
+to route them. Observed live in call c_fe37d4dde720 (2026-09-16): WrapAgent
+spent thirteen turns handling a product complaint, never reached "Did that
+resolve it for you?", and so confirm_resolution and record_csat were offered on
+all 17 post-handoff requests and called zero times — leaving resolution.status
+and csat null. Structural, not a defect: M4's Router is the fix, not a tighter
+gate here.
+
+The closing sequence is therefore only verifiable in a scripted call where the
+customer says goodbye and does not ask for help. end_call has still never run
+live (that same call ended via participant disconnect, reason
+"session_shutdown"), so its wait_for_playout guarantee remains unverified
+rather than failed.
 """
 
 from __future__ import annotations
