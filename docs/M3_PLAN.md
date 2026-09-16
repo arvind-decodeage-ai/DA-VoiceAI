@@ -253,6 +253,17 @@ M3's evidence is materially stronger than M2's: the JSON file is itself the arti
 by database rows and the worker log. The weaker-evidence risk recorded in the M2 plan closes
 here.
 
+**3. §8's `resolution.status` enum has no value for "completed but not resolved".**
+The five values are `resolved | escalated | callback | abandoned | timeout`.
+When a customer answers "no" to "Did that resolve it for you?", none of them is
+true: M3 has no escalation path and the persona promises no transfers, nothing
+scheduled a callback, no timer fired, and `abandoned` already means a final user
+turn went unanswered (T5) — reusing it would make that signal ambiguous. T7
+therefore leaves `resolution.status` unset in that case and records the answer in
+`slots.summary_confirmed` and the `slot_set` event, so nothing is lost. Whether
+§8 should gain a sixth value (`unresolved`) is a schema decision, deferred rather
+than invented.
+
 ## Live-only risks awaiting the model swap
 
 Behaviours that unit tests cannot reach, logged as they surface so they are
@@ -265,6 +276,7 @@ Each needs checking in the first live run after the swap.
 | L2 | The model may never call `move_to_wrap` at all, or may loop on the refusal | Whether `qwen/qwen3.8-27b` reliably chooses the handoff tool, and whether a refusal makes it ask for the missing slot rather than retry immediately, is a model-behaviour question |
 | L3 | `agent_turn.payload.interrupted = True` has never been observed | Only ever unit-tested against a synthetic ChatMessage; needs a real barge-in (also on the T10 checklist) |
 | L4 | `end_call`'s TTS flush is unverified | `RunContext.wait_for_playout()` returning before the room closes can only be seen in playout timing on a real call |
+| L5 | `end_call` calls `ctx.session.aclose()` from inside a tool the session owns | Unit tests close a stub. Whether closing a session from within one of its own tasks deadlocks, or truncates the final utterance despite the playout wait, is only visible on a real call |
 
 ## Risks
 

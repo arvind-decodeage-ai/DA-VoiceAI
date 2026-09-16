@@ -19,7 +19,7 @@ from agents import compose_instructions, stage_prompt  # noqa: E402
 from agents.greet import GreetAgent  # noqa: E402
 from agents.wrap import WrapAgent  # noqa: E402
 from events import EventLog, EventType  # noqa: E402
-from state import CallState, Slot, SlotStatus, Stage  # noqa: E402
+from state import CallState, ResolutionStatus, Slot, SlotStatus, Stage  # noqa: E402
 
 BASE = "BASE PERSONA TEXT"
 
@@ -61,11 +61,6 @@ def test_agents_carry_their_stage_instructions():
     wrap = WrapAgent(base_instructions=BASE, event_log=log)
     assert "OPENING" in greet.instructions and BASE in greet.instructions
     assert "CLOSING" in wrap.instructions and BASE in wrap.instructions
-
-
-def test_wrap_has_no_tools_until_t7():
-    """record_csat and end_call arrive in T7."""
-    assert list(WrapAgent(base_instructions=BASE, event_log=EventLog()).tools) == []
 
 
 # --------------------------------------------------------------------------
@@ -187,3 +182,200 @@ def test_stage_survives_serialization():
     state = CallState(call_id="c_test", stage=Stage.WRAP)
     assert CallState.model_validate_json(state.model_dump_json()).stage is Stage.WRAP
     assert state.model_dump(mode="json")["stage"] == "wrap"
+
+
+# --------------------------------------------------------------------------
+# T7 — WrapAgent tools (record_csat, end_call)
+#
+# Live verification is deferred (M3 plan D7): both are tools, and a
+# tool-calling turn cannot complete under the current Groq ITPM ceiling.
+# --------------------------------------------------------------------------
+
+
+class _SessionStub:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _WrapCtx(_Ctx):
+    """RunContext stand-in for the wrap tools: adds session + wait_for_playout."""
+
+    def __init__(self, state: CallState) -> None:
+        super().__init__(state)
+        self.session = _SessionStub()
+        self.playout_waited = False
+
+    async def wait_for_playout(self) -> None:
+        self.playout_waited = True
+
+
+@pytest.fixture
+def wrap_setup():
+    log = EventLog()
+    state = CallState(call_id="c_test", stage=Stage.WRAP)
+    return WrapAgent(base_instructions=BASE, event_log=log), _WrapCtx(state), state, log
+
+
+def test_wrap_exposes_its_three_tools():
+    tools = sorted(
+        t.info.name for t in WrapAgent(base_instructions=BASE, event_log=EventLog()).tools
+    )
+    assert tools == ["confirm_resolution", "end_call", "record_csat"]
+
+
+@pytest.mark.parametrize("rating", [1, 2, 3, 4, 5])
+def test_record_csat_accepts_the_valid_range(rating, wrap_setup):
+    agent, ctx, state, log = wrap_setup
+    asyncio.run(agent.record_csat(ctx, rating))
+
+    assert state.wrap.csat.value == str(rating)
+    events = [e for e in log.events if e.type is EventType.CSAT_RECORDED]
+    assert len(events) == 1
+    assert events[0].payload["csat"] == rating  # the int, not the slot string
+
+
+@pytest.mark.parametrize("rating", [0, 6, -1, 99])
+def test_record_csat_refuses_out_of_range_without_writing_anything(rating, wrap_setup):
+    """A bad rating must not reach the log: §8 constrains csat to 1-5."""
+    agent, ctx, state, log = wrap_setup
+    result = asyncio.run(agent.record_csat(ctx, rating))
+
+    assert isinstance(result, str) and "not a valid rating" in result
+    assert state.wrap.csat.status is SlotStatus.PENDING
+    assert not [e for e in log.events if e.type is EventType.CSAT_RECORDED]
+
+
+def test_record_csat_refuses_a_non_integer(wrap_setup):
+    agent, ctx, state, log = wrap_setup
+    result = asyncio.run(agent.record_csat(ctx, "five"))  # type: ignore[arg-type]
+
+    assert isinstance(result, str) and "not a valid rating" in result
+    assert not [e for e in log.events if e.type is EventType.CSAT_RECORDED]
+
+
+def test_csat_is_readable_by_jsonbuilder_from_the_log(wrap_setup):
+    """The event carries the authoritative number; the slot only gates the stage."""
+    from output import build_call_json
+
+    agent, ctx, state, log = wrap_setup
+    asyncio.run(agent.record_csat(ctx, 4))
+    assert build_call_json(log, state)["csat"] == 4
+
+
+def test_end_call_flushes_playout_before_closing(wrap_setup):
+    """PRD §10 M3: end_call waits for the TTS flush before the room closes."""
+    agent, ctx, _, log = wrap_setup
+    asyncio.run(agent.end_call(ctx))
+
+    assert ctx.playout_waited is True
+    assert ctx.session.closed is True
+
+    ended = [e for e in log.events if e.type is EventType.CALL_ENDED]
+    assert len(ended) == 1
+    assert ended[0].payload["reason"] == "end_call"
+
+
+def test_end_call_logs_the_end_before_closing_the_session(wrap_setup):
+    """Ordering matters: a session closed first could lose the event."""
+    agent, ctx, _, log = wrap_setup
+
+    order: list[str] = []
+    original = ctx.session.aclose
+
+    async def _tracking_close() -> None:
+        order.append(f"close after {len(log)} events")
+        await original()
+
+    ctx.session.aclose = _tracking_close  # type: ignore[assignment]
+    asyncio.run(agent.end_call(ctx))
+
+    assert order == ["close after 1 events"]  # call_ended was already appended
+
+
+def test_last_csat_wins_if_the_customer_revises_it(wrap_setup):
+    from output import build_call_json
+
+    agent, ctx, state, log = wrap_setup
+    asyncio.run(agent.record_csat(ctx, 2))
+    asyncio.run(agent.record_csat(ctx, 5))
+    assert build_call_json(log, state)["csat"] == 5
+
+
+def test_confirm_resolution_true_fills_the_slot_and_sets_resolved(wrap_setup):
+    agent, ctx, state, log = wrap_setup
+    asyncio.run(agent.confirm_resolution(ctx, True))
+
+    assert state.wrap.summary_confirmed.value == "yes"
+    assert state.wrap.summary_confirmed.status is SlotStatus.FILLED
+    assert state.resolution.status is ResolutionStatus.RESOLVED
+
+    events = [e for e in log.events if e.type is EventType.SLOT_SET]
+    assert len(events) == 1
+    assert events[0].payload["slot"] == "summary_confirmed"
+    assert events[0].payload["resolved"] is True
+
+
+def test_confirm_resolution_false_records_the_answer_without_inventing_a_status(wrap_setup):
+    """§8's enum has no value for "completed but not resolved".
+
+    escalated, callback and timeout would all assert something that did not
+    happen, and abandoned already means a final user turn went unanswered.
+    """
+    agent, ctx, state, log = wrap_setup
+    asyncio.run(agent.confirm_resolution(ctx, False))
+
+    assert state.wrap.summary_confirmed.value == "no"
+    assert state.wrap.summary_confirmed.status is SlotStatus.FILLED
+    assert state.resolution.status is None  # not guessed
+
+    events = [e for e in log.events if e.type is EventType.SLOT_SET]
+    assert events[0].payload["resolved"] is False  # the answer is not lost
+
+
+def test_a_negative_resolution_still_reaches_the_json(wrap_setup):
+    from output import build_call_json
+
+    agent, ctx, state, log = wrap_setup
+    asyncio.run(agent.confirm_resolution(ctx, False))
+
+    doc = build_call_json(log, state)
+    assert doc["slots"]["summary_confirmed"] == "no"
+    assert doc["resolution"]["status"] is None
+
+
+def test_a_resolved_call_reaches_the_json_as_resolved(wrap_setup):
+    from output import build_call_json
+
+    agent, ctx, state, log = wrap_setup
+    asyncio.run(agent.confirm_resolution(ctx, True))
+    asyncio.run(agent.record_csat(ctx, 5))
+
+    doc = build_call_json(log, state)
+    assert doc["resolution"]["status"] == "resolved"
+    assert doc["slots"]["summary_confirmed"] == "yes"
+    assert doc["csat"] == 5
+
+
+def test_confirm_resolution_false_refusal_guidance_promises_nothing(wrap_setup):
+    """The message goes back to the model; it must not seed an invented next step."""
+    agent, ctx, _, _ = wrap_setup
+    reply = asyncio.run(agent.confirm_resolution(ctx, False))
+    assert "not promise" in reply or "Do not promise" in reply
+
+
+def test_the_full_wrap_sequence_produces_a_complete_document(wrap_setup):
+    from output import build_call_json
+
+    agent, ctx, state, log = wrap_setup
+    asyncio.run(agent.confirm_resolution(ctx, True))
+    asyncio.run(agent.record_csat(ctx, 4))
+    asyncio.run(agent.end_call(ctx))
+
+    doc = build_call_json(log, state)
+    assert doc["resolution"]["status"] == "resolved"
+    assert doc["csat"] == 4
+    assert doc["ended_at"] is not None
+    assert state.wrap.is_complete()  # both PRD §5 wrap slots captured

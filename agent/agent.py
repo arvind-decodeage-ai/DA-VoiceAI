@@ -294,7 +294,11 @@ async def entrypoint(ctx: JobContext) -> None:
         metrics.report()
 
     async def _close_event_log() -> None:
-        event_log.append(EventType.CALL_ENDED)
+        # end_call appends call_ended itself when the agent closes the call
+        # deliberately; this covers every other way a call ends (hangup, crash,
+        # worker shutdown) without logging a second one.
+        if not any(e.type is EventType.CALL_ENDED for e in event_log):
+            event_log.append(EventType.CALL_ENDED, {"reason": "session_shutdown"})
         logger.info(
             "[eventlog] %d events, %d turns", len(event_log), event_log.turn_count
         )
