@@ -10,3 +10,4 @@ out/*.json
 out/
 tools/__pycache__/
 docs/
+milestones/
