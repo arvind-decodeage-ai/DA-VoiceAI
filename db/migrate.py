@@ -62,6 +62,13 @@ CREATE TABLE IF NOT EXISTS slots (
     ts          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- M3 D4: the built PRD §8 document, stored whole. The normalized tables above
+-- stay the queryable projection; this column is the authoritative artifact and
+-- the home for §8 fields that have no column of their own (csat, resolution,
+-- compliance_flags, latency, recording_url). Added with IF NOT EXISTS so this
+-- migration remains safe to re-run, like everything above it.
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS result JSONB;
+
 CREATE INDEX IF NOT EXISTS idx_turns_call_id ON turns(call_id);
 CREATE INDEX IF NOT EXISTS idx_events_call_id ON events(call_id);
 CREATE INDEX IF NOT EXISTS idx_slots_call_id ON slots(call_id);
@@ -74,7 +81,7 @@ def migrate() -> None:
         with conn.cursor() as cur:
             cur.execute(SCHEMA)
         conn.commit()
-    logger.info("migration applied: calls, turns, events, slots")
+    logger.info("migration applied: calls (+result), turns, events, slots")
 
 
 if __name__ == "__main__":

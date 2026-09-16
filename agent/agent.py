@@ -39,9 +39,13 @@ from livekit.plugins.sarvam import TTS as SarvamTTS
 from livekit.plugins.sarvam import STTRealtime
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
+import psycopg
+
 from agents.greet import GreetAgent
 from config import get_settings
 from events import EventLog, EventType
+from output import build_call_json
+from persistence import finalize_call, start_call
 from state import CallState
 
 load_dotenv()
@@ -311,6 +315,23 @@ async def entrypoint(ctx: JobContext) -> None:
                 event.payload,
             )
 
+        # Persistence runs here, inside this callback, rather than as its own
+        # shutdown callback: the framework launches shutdown callbacks as
+        # concurrent tasks (job.py:429), so registration order guarantees
+        # nothing, and the call_ended event appended above must already be in
+        # the log before the document is built.
+        _persist(build_call_json(event_log, call_state))
+
+    def _persist(document: dict) -> None:
+        """Write the completed call. Never lets a database problem break a call."""
+        try:
+            with psycopg.connect(settings.database_url, connect_timeout=5) as conn:
+                finalize_call(conn, call_state, event_log, document)
+                conn.commit()
+            logger.info("[persistence] call %s written", call_state.call_id)
+        except Exception:
+            logger.exception("[persistence] failed to write call %s", call_state.call_id)
+
     ctx.add_shutdown_callback(_report_metrics)
     ctx.add_shutdown_callback(_close_event_log)
 
@@ -326,6 +347,17 @@ async def entrypoint(ctx: JobContext) -> None:
     event_log.append(
         EventType.CALL_STARTED, {"room": ctx.room.name, "call_id": call_state.call_id}
     )
+
+    # One row before any conversation, so a call that crashes or is abandoned
+    # leaves a visible in_progress record rather than nothing at all. This is
+    # the only database access until the call ends.
+    try:
+        with psycopg.connect(settings.database_url, connect_timeout=5) as conn:
+            start_call(conn, call_state)
+            conn.commit()
+    except Exception:
+        logger.exception("[persistence] failed to open call %s", call_state.call_id)
+
     logger.info("agent ready")
 
     # Best-effort: on a real (SIP/telephony or browser) call the room/job can exist a
