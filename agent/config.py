@@ -21,10 +21,11 @@ class Settings(BaseSettings):
     # openrouter_model: str = ""
     # openrouter_fallback_model: str = ""
 
-    # LLM provider (currently Groq; swap base URL and key for any OpenAI-compatible provider)
-    llm_provider: str = "groq"
+    # LLM provider (currently OpenRouter; swap base URL and key for any
+    # OpenAI-compatible provider)
+    llm_provider: str = "openrouter"
     llm_api_key: str = ""
-    llm_base_url: str = "https://api.groq.com/openai/v1"
+    llm_base_url: str = "https://openrouter.ai/api/v1"
     llm_model: str = ""
     llm_fallback_model: str = ""
 

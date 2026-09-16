@@ -186,27 +186,22 @@ async def entrypoint(ctx: JobContext) -> None:
             model=settings.llm_model,
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url,
-            # qwen/qwen3.8-27b on Groq defaults to "thinking" mode and, with no cap,
-            # can run its completion out to the model's 16384-token ceiling — either
-            # one blows well past this account's 1000 output-tokens-per-minute limit
-            # in a single turn. max_completion_tokens=300 caps a single reply
-            # comfortably above a ~25-word spoken turn (PRD persona) while leaving
-            # OTPM headroom for more than one turn landing in the same rolling minute.
+            # Provider is OpenRouter (PRD §3), model deepseek/deepseek-v4.1-flash.
+            # Both come from the environment, so swapping either is a .env change.
             #
-            # reasoning_effort: was "none" (fully non-thinking); the M1 test log showed
-            # several real-session turns (short/ambiguous filler inputs like "Okay." or
-            # "Any questions you have for me?") collapse to a 1-2 word assistant reply
-            # ("Is", "No") — a complete, non-truncated LLM output, not a token-cap cutoff.
-            # An isolated single-turn repro at "none" did NOT reproduce the collapse, so
-            # this isn't confirmed as the fix — but "low" produced strictly fuller, more
-            # natural replies on every repro case tested, at a negligible latency cost
-            # (30-155ms measured), so it's a low-risk mitigation pending the real re-test.
+            # The output cap goes through extra_body rather than the plugin's
+            # max_completion_tokens argument: this model's OpenRouter metadata
+            # lists max_tokens as supported and max_completion_tokens as not, and
+            # OpenRouter drops parameters a model does not support — so passing
+            # the plugin's argument would silently leave the reply uncapped. 300
+            # sits comfortably above a ~25-word spoken turn (PRD §6 persona).
+            extra_body={"max_tokens": 300},
+            # Carried over from the Groq/qwen setup, where "low" produced fuller
+            # replies than "none" on short filler inputs. deepseek-v4.1-flash
+            # lists reasoning_effort as supported, but this value has NOT been
+            # re-validated against it — revisit if replies come back terse or
+            # slow.
             reasoning_effort="low",
-            max_completion_tokens=300,
-            # --- OpenRouter (commented out; PRD's originally specified provider) ---
-            # model=settings.openrouter_model,
-            # api_key=settings.openrouter_api_key,
-            # base_url="https://openrouter.ai/api/v1",
         ),
         tts=SarvamTTS(
             model="bulbul:v3",
