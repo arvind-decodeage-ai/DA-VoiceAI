@@ -20,6 +20,7 @@ Run with:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import statistics
 from datetime import datetime, timezone
@@ -38,8 +39,10 @@ from livekit.plugins.sarvam import TTS as SarvamTTS
 from livekit.plugins.sarvam import STTRealtime
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
+from agents.greet import GreetAgent
 from config import get_settings
 from events import EventLog, EventType
+from state import CallState
 
 load_dotenv()
 
@@ -162,7 +165,14 @@ async def entrypoint(ctx: JobContext) -> None:
     event_log = EventLog()
     await ctx.connect()
 
-    session = AgentSession(
+    # Live per-call state, shared by every agent and tool through
+    # session.userdata (M3 plan D3: in-process, not Redis). The room name is the
+    # call id — POST /calls names the room after it, and console mode uses
+    # "console".
+    call_state = CallState(call_id=ctx.room.name)
+
+    session = AgentSession[CallState](
+        userdata=call_state,
         stt=STTRealtime(
             language="auto",  # PRD says language="unknown"; this plugin's auto-detect
             # sentinel is "auto" — see M1 final report for the substitution rationale.
@@ -231,6 +241,10 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_user_input_transcribed(ev: UserInputTranscribedEvent) -> None:
         if ev.is_final and ev.language and session.tts is not None:
             session.tts.update_options(target_language_code=ev.language)
+        if ev.is_final and ev.language:
+            # CallState tracks language per turn (deviation #6). JSONBuilder
+            # falls back to this when no turn in the log carries one.
+            call_state.note_language(ev.language)
         if ev.is_final:
             # Stashed for the user_turn event below. conversation_item_added is
             # the single producer of turn events (so each turn is logged exactly
@@ -296,11 +310,42 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.add_shutdown_callback(_report_metrics)
     ctx.add_shutdown_callback(_close_event_log)
 
-    agent = Agent(instructions=f"{BASE_PERSONA}\n\n{LANGUAGE_MATCH_INSTRUCTION}")
+    # GreetAgent opens the conversation machine; it hands off to WrapAgent through
+    # a code-enforced gate (PRD §5). The shared persona is composed here so there
+    # is one place that decides what every stage inherits.
+    agent = GreetAgent(
+        base_instructions=f"{BASE_PERSONA}\n\n{LANGUAGE_MATCH_INSTRUCTION}",
+        event_log=event_log,
+    )
 
     await session.start(agent=agent, room=ctx.room)
-    event_log.append(EventType.CALL_STARTED, {"room": ctx.room.name})
+    event_log.append(
+        EventType.CALL_STARTED, {"room": ctx.room.name, "call_id": call_state.call_id}
+    )
     logger.info("agent ready")
+
+    # Best-effort: on a real (SIP/telephony or browser) call the room/job can exist a
+    # moment before the caller's participant has actually joined/subscribed, so give
+    # it a short window to show up. Bounded, not blocking — ctx.wait_for_participant()
+    # alone would hang forever in console mode, where there's no RemoteParticipant
+    # object at all.
+    try:
+        await asyncio.wait_for(ctx.wait_for_participant(), timeout=3.0)
+    except asyncio.TimeoutError:
+        logger.info("no participant joined within 3s, greeting anyway")
+
+    # The agent must speak first, unconditionally — the caller should never have to
+    # say anything before the agent starts the conversation. This is a fixed line
+    # spoken directly via TTS (session.say), not routed through the LLM, so it can't
+    # fail to fire because of an LLM timeout/error. add_to_chat_ctx=True (default)
+    # still records it as the assistant's first turn, so the model has it as context
+    # for everything that follows.
+    #
+    # Deviation #7: this is the single source of the opening line. The persona's
+    # OPENING GREETING section and the greet stage prompt both tell the model the
+    # greeting has already happened, so it does not greet twice.
+    GREETING = "Hi! You've reached the customer support team at Decode Age. How may I help you today?"
+    session.say(GREETING)
 
 
 if __name__ == "__main__":
