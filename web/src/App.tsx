@@ -7,12 +7,14 @@
  * T6 — End tears the call down: the browser leaves the room first, then the
  *      frontend calls DELETE /calls/{id} so the room is deleted and the worker's
  *      job ends. State returns to Start call.
+ * T9 — after the call ends, the §8 document is fetched and shown.
  */
 
 import { useCallback, useRef, useState } from "react";
 import { LiveKitRoom, RoomAudioRenderer } from "@livekit/components-react";
 
 import { createCall, endCall, type CallCredentials } from "./api";
+import { CallJson } from "./CallJson";
 import { StatusBar } from "./StatusBar";
 import { Transcript } from "./Transcript";
 
@@ -23,6 +25,9 @@ export default function App() {
   const [creds, setCreds] = useState<CallCredentials | null>(null);
   const [startedAt, setStartedAt] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  // Kept after teardown so the finished call's document can be fetched; the
+  // live `creds` are cleared as soon as the room closes.
+  const [finishedCallId, setFinishedCallId] = useState<string | null>(null);
 
   // The disconnect handler fires from inside LiveKitRoom, where a state value
   // captured at render time may be stale, so the call id is mirrored in a ref.
@@ -37,6 +42,7 @@ export default function App() {
     try {
       const next = await createCall();
       callIdRef.current = next.call_id;
+      setFinishedCallId(null);
       teardownRef.current = false;
       setCreds(next);
       setStartedAt(Date.now());
@@ -63,6 +69,7 @@ export default function App() {
     callIdRef.current = null;
     setCreds(null);
     setPhase("idle");
+    if (callId) setFinishedCallId(callId);
 
     if (!callId || teardownRef.current) return;
     teardownRef.current = true;
@@ -112,6 +119,8 @@ export default function App() {
           </section>
         </LiveKitRoom>
       )}
+
+      {phase === "idle" && finishedCallId && <CallJson callId={finishedCallId} />}
     </main>
   );
 }

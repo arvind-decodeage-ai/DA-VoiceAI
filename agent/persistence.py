@@ -21,6 +21,9 @@ is a test that kills a call to prove it.
 
 from __future__ import annotations
 
+import json
+import logging
+from pathlib import Path
 from typing import Any, Optional
 
 import psycopg
@@ -28,6 +31,11 @@ from psycopg.types.json import Jsonb
 
 from events import EventLog, EventType
 from state import CallState
+
+logger = logging.getLogger("da-voice.persistence")
+
+#: Where the §8 document is written, per PRD §9 and the M3 acceptance criteria.
+DEFAULT_OUT_DIR = Path(__file__).resolve().parent.parent / "out"
 
 STATUS_IN_PROGRESS = "in_progress"
 STATUS_COMPLETED = "completed"
@@ -54,17 +62,54 @@ def finalize_call(
     state: CallState,
     log: EventLog,
     document: dict[str, Any],
-) -> None:
-    """Write the whole log and the built document, in one transaction.
+    *,
+    out_dir: Optional[Path] = DEFAULT_OUT_DIR,
+) -> Optional[Path]:
+    """Write the whole log and the built document, then the ./out/ file.
 
-    Everything or nothing: a partial write would leave rows that disagree with
-    ``calls.result``, which is precisely the drift this design exists to avoid.
+    The database write is one transaction — everything or nothing, since a
+    partial write would leave rows disagreeing with ``calls.result``, which is
+    the drift this design exists to avoid.
+
+    The file is written from the *same* ``document`` object, so the row and the
+    file can never hold different content. They are not atomic with each other:
+    the transaction commits first, and a filesystem failure afterwards leaves
+    the row without the file. That ordering is deliberate — the database is the
+    source of truth and ``GET /calls/{id}/json`` reads from it, so a missing
+    file is a missing convenience copy, never a wrong one. Writing the file
+    first would risk a file describing a call the database never recorded.
+
+    Returns the path written, or None when no file was written.
     """
     with conn.transaction():
         _insert_events(conn, state.call_id, log)
         _insert_turns(conn, state.call_id, log)
         _insert_slots(conn, state.call_id, log)
         _finalize_row(conn, state, document)
+
+    if out_dir is None:
+        return None
+    return write_document(out_dir, state.call_id, document)
+
+
+def write_document(
+    out_dir: Path, call_id: str, document: dict[str, Any]
+) -> Optional[Path]:
+    """Write the §8 document to ``<out_dir>/<call_id>.json``.
+
+    Never raises: the call is already durably recorded in the database by the
+    time this runs, so a filesystem problem must not turn a completed call into
+    a failed one. It is logged loudly instead.
+    """
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{call_id}.json"
+        path.write_text(json.dumps(document, indent=2, ensure_ascii=False), encoding="utf-8")
+        logger.info("wrote %s", path)
+        return path
+    except Exception:
+        logger.exception("failed to write the call document for %s", call_id)
+        return None
 
 
 def _insert_events(conn: psycopg.Connection, call_id: str, log: EventLog) -> None:

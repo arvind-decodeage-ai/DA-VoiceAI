@@ -6,9 +6,18 @@ Three endpoints, no persistence:
     DELETE /calls/{call_id}  delete the room (the agent's job ends with it)
     GET    /healthz          liveness, plus whether LiveKit is reachable
 
-Call state lives in an in-memory dict. Postgres is deliberately untouched in M2 —
-EventLog, CallState and the JSON output arrive in M3 (PRD §10), which is also when
-the schema gains meaning.
+DECISION (M3 T9) — this module now reads from Postgres, reversing M2's
+"no persistence in the API" position. M2 kept the API storage-free because
+nothing had been written yet and the schema had no meaning; M3 T8 fills
+``calls.result`` with the §8 document, and ``GET /calls/{id}/json`` has to serve
+it from somewhere. It reads the database rather than ``./out/<call_id>.json``
+because the file is a convenience copy that may be absent (see
+``persistence.finalize_call``), while the row is the source of truth. Writes
+remain out of scope here: the API still creates no rows. The agent owns writing,
+the API owns reading.
+
+Call creation state still lives in an in-memory dict — that part of M2's
+decision stands.
 
 Run from the repository root (``Settings`` resolves ``.env`` relative to CWD):
 
@@ -24,6 +33,7 @@ from datetime import datetime, timezone
 from typing import AsyncIterator
 from uuid import uuid4
 
+import psycopg
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from livekit import api
@@ -103,6 +113,32 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/calls/{call_id}/json")
+async def call_json(call_id: str) -> dict:
+    """Serve the PRD §8 document for a completed call.
+
+    404 covers three cases that are the same to a caller: no such call, a call
+    still in progress, and a call whose finalisation never ran. All three mean
+    "there is no document for this id yet".
+    """
+    settings = app.state.settings
+    try:
+        async with await psycopg.AsyncConnection.connect(
+            settings.database_url, connect_timeout=5
+        ) as conn:
+            cursor = await conn.execute(
+                "SELECT result FROM calls WHERE id = %s", (call_id,)
+            )
+            row = await cursor.fetchone()
+    except Exception as e:  # noqa: BLE001
+        logger.exception("failed to read call %s", call_id)
+        raise HTTPException(status_code=503, detail=f"database unavailable: {e}") from e
+
+    if row is None or row[0] is None:
+        raise HTTPException(status_code=404, detail="no call document for that id")
+    return row[0]
 
 
 @app.get("/healthz", response_model=HealthResponse)

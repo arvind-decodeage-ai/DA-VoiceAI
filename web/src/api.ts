@@ -25,3 +25,24 @@ export async function endCall(callId: string): Promise<void> {
     throw new Error(`DELETE /calls/${callId} failed: ${res.status}`);
   }
 }
+
+/** Fetch the PRD §8 document for a finished call.
+ *
+ * Persistence runs during the agent's shutdown, which lands a moment after the
+ * room closes, so the document is not there the instant End is pressed. Retry a
+ * few times before giving up; a 404 here means "not ready yet", not "gone".
+ */
+export async function fetchCallJson(
+  callId: string,
+  { attempts = 6, delayMs = 1000 }: { attempts?: number; delayMs?: number } = {},
+): Promise<unknown | null> {
+  for (let i = 0; i < attempts; i++) {
+    const res = await fetch(`${API_BASE}/calls/${callId}/json`);
+    if (res.ok) return res.json();
+    if (res.status !== 404) {
+      throw new Error(`GET /calls/${callId}/json failed: ${res.status}`);
+    }
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return null;
+}

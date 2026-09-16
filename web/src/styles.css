@@ -119,3 +119,28 @@ button:disabled { opacity: 0.6; cursor: default; }
 }
 .line.caller .who { color: var(--accent); }
 .line .what { flex: 1; }
+
+/* --- T9: call document viewer --- */
+
+.calljson {
+  margin-top: 28px;
+  text-align: left;
+}
+.calljson h2 {
+  font-size: 0.95rem;
+  margin: 0 0 4px;
+}
+.muted { color: var(--muted); font-size: 0.9rem; }
+
+.json {
+  max-height: 340px;
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid #262a38;
+  border-radius: 12px;
+  background: #171925;
+  font-family: ui-monospace, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  white-space: pre;
+}
