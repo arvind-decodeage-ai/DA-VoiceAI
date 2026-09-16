@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Decode Age call output (PRD §8)",
+  "description": "The contract from PRD §8. Fields owned by later milestones (compliance_flags, guardrail_events, latency, recording_url) are nullable or empty in M3 but must always be present, so the document keeps one shape from M3 through M7.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "call_id",
+    "started_at",
+    "ended_at",
+    "duration_s",
+    "language",
+    "caller",
+    "intents",
+    "qa",
+    "slots",
+    "resolution",
+    "csat",
+    "compliance_flags",
+    "guardrail_events",
+    "latency",
+    "transcript",
+    "recording_url"
+  ],
+  "properties": {
+    "call_id": { "type": "string", "minLength": 1 },
+    "started_at": { "type": "string", "format": "date-time" },
+    "ended_at": { "type": ["string", "null"], "format": "date-time" },
+    "duration_s": { "type": ["integer", "null"], "minimum": 0 },
+    "language": { "type": ["string", "null"] },
+    "caller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "phone", "customer_id"],
+      "properties": {
+        "name": { "type": ["string", "null"] },
+        "phone": { "type": ["string", "null"] },
+        "customer_id": { "type": ["string", "null"] }
+      }
+    },
+    "intents": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "order_status",
+          "product_info",
+          "returns_refund",
+          "subscription",
+          "complaint",
+          "fallback"
+        ]
+      },
+      "maxItems": 3
+    },
+    "qa": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "turn_idx",
+          "agent",
+          "question",
+          "answer_raw",
+          "answer_normalized",
+          "slot",
+          "tool_calls",
+          "ts"
+        ],
+        "properties": {
+          "turn_idx": { "type": "integer", "minimum": 1 },
+          "agent": { "type": "string" },
+          "question": { "type": "string" },
+          "answer_raw": { "type": "string" },
+          "answer_normalized": { "type": "string" },
+          "slot": { "type": ["string", "null"] },
+          "tool_calls": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "args", "result"],
+              "properties": {
+                "name": { "type": "string" },
+                "args": { "type": "object" },
+                "result": { "type": "object" }
+              }
+            }
+          },
+          "ts": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "slots": { "type": "object" },
+    "resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "summary", "ticket_id"],
+      "properties": {
+        "status": {
+          "type": ["string", "null"],
+          "enum": ["resolved", "escalated", "callback", "abandoned", "timeout", null]
+        },
+        "summary": { "type": ["string", "null"] },
+        "ticket_id": { "type": ["string", "null"] }
+      }
+    },
+    "csat": { "type": ["integer", "null"], "minimum": 1, "maximum": 5 },
+    "compliance_flags": { "type": "array" },
+    "guardrail_events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "turn_idx", "detail"],
+        "properties": {
+          "type": { "type": "string" },
+          "turn_idx": { "type": "integer" },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "latency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["avg_turn_ms", "p95_turn_ms"],
+      "properties": {
+        "avg_turn_ms": { "type": ["number", "null"], "minimum": 0 },
+        "p95_turn_ms": { "type": ["number", "null"], "minimum": 0 }
+      }
+    },
+    "transcript": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "agent", "text", "ts"],
+        "properties": {
+          "role": { "type": "string", "enum": ["user", "agent"] },
+          "agent": { "type": "string" },
+          "text": { "type": "string" },
+          "ts": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "recording_url": { "type": ["string", "null"] }
+  }
+}
