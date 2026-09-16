@@ -174,6 +174,7 @@ the disconnect and calls `DELETE /calls/{id}`. No new room-closing mechanism.
 | D4 | Add `calls.result JSONB`? | **Yes**, via an idempotent `ADD COLUMN IF NOT EXISTS` consistent with the M0 migration. |
 | D5 | Language lock vs per-turn matching | **Keep M1's per-turn matching.** Real callers code-switch mid-call; responding in the language just spoken beats a lock held for PRD-letter compliance. Deviation #6. |
 | D6 | Who closes the room on `end_call` | **Reuse the M2 T6 teardown path.** No new mechanism. |
+| D7 | Live tool-calling verification under the ITPM ceiling | **Deferred until a model/tier swap.** Build T7-T9 on the current Groq config with full unit coverage, but do not record any task as closed on unit tests alone. A tool-calling turn costs two LLM requests within seconds (`agent_activity.py:3759` creates a `tool_response_task` that calls `_pipeline_reply_task` again) at ~4,350 input tokens each, against a 7,000 ITPM ceiling — so no pacing, scripted or manual, allows one to complete. What unblocks it: a better-resourced model or tier, or the planned OpenRouter migration. Timing undecided. |
 
 D1 and D5 were decided together on purpose: a persona that promises to follow the
 customer's language would contradict a hard language lock.
@@ -200,10 +201,10 @@ customer's language would contradict a hard language lock.
 | T4 | Wire session events → EventLog | A real console call produces a complete ordered log; every user and agent turn appears exactly once |
 | T5 | `JSONBuilder` | Pure function; output validates against a §8 JSON Schema in tests, built from a synthetic EventLog fixture (no live call needed to test it) |
 | T6 | Greet/Wrap agents, prompts, gated handoff | **Implementation complete; live LLM handoff acceptance blocked by the current Groq ITPM ceiling.** The gate is unit-tested in both directions (refusal with slots open, refusal naming only the missing slot, success once resolved, one `agent_handoff` logged) — but no live run has yet had an LLM decide to call `move_to_wrap`. Two attempts produced zero tool calls: each request costs ~4,360 input tokens against a 7,000 ITPM limit, so retries exhaust the window and the exhausted LLM task terminated the session. That is open item 1's silent mid-generation failure, reproduced. Unblocking it is an infrastructure decision, not T6 work |
-| T7 | `record_csat` + `end_call` | CSAT captured 1-5; `end_call` flushes TTS before close, evidenced by playout timing in the worker log |
-| T8 | Persistence + migration | `calls`/`turns`/`events`/`slots` populated for a real call and consistent with the JSON; `db/migrate.py` still safe to re-run; **and the crash-loss behaviour is tested, not just described** — a call killed mid-conversation leaves exactly one `calls` row with `status='in_progress'`, no `turns`/`events`/`slots` rows, and no `result`, proving the loss is bounded and visible rather than silent or partial |
-| T9 | `GET /calls/{id}/json` + UI viewer | JSON fetchable after End and rendered in the browser |
-| T10 | Acceptance run + `docs/M3_STATUS.md` | All criteria below evidenced from a real call, measured rather than asserted. **Must include a real microphone session with an actual barge-in**: `agent_turn.payload.interrupted = True` has only ever been unit-tested against a synthetic ChatMessage. T4's evidence run went through `console --text`, which bypasses STT and VAD, so a genuine interruption has never been observed end to end |
+| T7 | `record_csat` + `end_call` | Unit coverage complete. **Live verification: not yet run — pending model swap (D7).** Both are tools, so neither can execute on the current tier. CSAT captured 1-5; `end_call` flushes TTS before close, to be evidenced by playout timing in the worker log once live runs are possible |
+| T8 | Persistence + migration | **Live verification: not yet run — pending model swap (D7).** `calls`/`turns`/`events`/`slots` populated for a real call and consistent with the JSON; `db/migrate.py` still safe to re-run; **and the crash-loss behaviour is tested, not just described** — a call killed mid-conversation leaves exactly one `calls` row with `status='in_progress'`, no `turns`/`events`/`slots` rows, and no `result`, proving the loss is bounded and visible rather than silent or partial |
+| T9 | `GET /calls/{id}/json` + UI viewer | JSON fetchable after End and rendered in the browser. **Live verification: not yet run — pending model swap (D7)** — a call has to reach `end_call` to produce a document |
+| T10 | Acceptance run + `docs/M3_STATUS.md` | **BLOCKED until the model/tier swap (D7), not merely slowed.** T10 is a real paced conversation by definition, and a tool-calling turn cannot complete on the current tier — so M3's finish line is blocked, not just its pace. When T10 does run: all criteria below evidenced from a real call, measured rather than asserted. **Must include a real microphone session with an actual barge-in**: `agent_turn.payload.interrupted = True` has only ever been unit-tested against a synthetic ChatMessage. T4's evidence run went through `console --text`, which bypasses STT and VAD, so a genuine interruption has never been observed end to end |
 
 ## Open items carried into T5 scoping
 
@@ -251,6 +252,19 @@ be confirmed in T5: do not synthesise an empty `qa[]` entry; surface it through
 M3's evidence is materially stronger than M2's: the JSON file is itself the artifact, backed
 by database rows and the worker log. The weaker-evidence risk recorded in the M2 plan closes
 here.
+
+## Live-only risks awaiting the model swap
+
+Behaviours that unit tests cannot reach, logged as they surface so they are
+examined rather than quietly accumulating while live runs are deferred (D7).
+Each needs checking in the first live run after the swap.
+
+| # | Risk | Why only a live run settles it |
+|---|---|---|
+| L1 | The gate's refusal string may be read aloud to the customer | `move_to_wrap` returns "Not yet — still missing: identity_confirmed, name" to the *model*, not the customer. A weaker model may recite it verbatim. The gate would be working perfectly and the call would still sound broken |
+| L2 | The model may never call `move_to_wrap` at all, or may loop on the refusal | Whether `qwen/qwen3.8-27b` reliably chooses the handoff tool, and whether a refusal makes it ask for the missing slot rather than retry immediately, is a model-behaviour question |
+| L3 | `agent_turn.payload.interrupted = True` has never been observed | Only ever unit-tested against a synthetic ChatMessage; needs a real barge-in (also on the T10 checklist) |
+| L4 | `end_call`'s TTS flush is unverified | `RunContext.wait_for_playout()` returning before the room closes can only be seen in playout timing on a real call |
 
 ## Risks
 
