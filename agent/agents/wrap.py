@@ -21,6 +21,15 @@ customer says goodbye and does not ask for help. end_call has still never run
 live (that same call ended via participant disconnect, reason
 "session_shutdown"), so its wait_for_playout guarantee remains unverified
 rather than failed.
+
+A scripted attempt to reach it (2026-09-16, console --text, out/l4-close-163427.log)
+did not get there either: the conversation ran to 20 LLM requests but executed
+zero tools, so end_call was never called and aclose() was never exercised. That
+run also hit an LLM timeout and a fatal Sarvam STT error (text mode starves STT
+of audio), and its shutdown never finalised — the calls row stayed in_progress.
+Why no tool fired is unresolved; note that both zero-tool runs were text mode,
+while the only run where tools did fire was a real browser call. L4 and L5
+remain untested.
 """
 
 from __future__ import annotations
