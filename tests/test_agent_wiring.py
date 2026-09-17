@@ -332,11 +332,13 @@ def test_scheduler_does_not_schedule_a_second_task_while_the_first_is_pending():
 
 
 def test_time_cap_still_fires_when_the_intent_cap_is_already_reached():
-    """Router doesn't exist yet, so this only asserts the two mechanisms are
-    genuinely independent: reaching MAX_INTENTS_PER_CALL does not block the
-    time cap from firing. Per the documented precedence rule, the time check
-    always has final say for the turn it runs in, since it is evaluated after
-    any tool calls that turn already made."""
+    """This asserts the two mechanisms are genuinely independent: reaching
+    MAX_INTENTS_PER_CALL does not block the time cap from firing. Per the
+    documented precedence rule, the time check always has final say for the
+    turn it runs in, since it is evaluated after any tool calls that turn
+    already made. Drives CallState directly (not through RouterAgent.set_intent)
+    because this test is about the scheduler/state-layer independence, not
+    about Router's own cap handling — that is covered in test_agents.py."""
 
     async def run() -> None:
         session = _FakeSession(playout_event=_set_event())

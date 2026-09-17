@@ -18,9 +18,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 from agents import compose_instructions, stage_prompt  # noqa: E402
 from agents.greet import GreetAgent  # noqa: E402
 from agents.order_status import OrderStatusAgent  # noqa: E402
+from agents.router import RouterAgent  # noqa: E402
 from agents.wrap import WrapAgent  # noqa: E402
 from events import EventLog, EventType  # noqa: E402
-from state import CallState, Intent, ResolutionStatus, Slot, SlotStatus, Stage  # noqa: E402
+from state import (  # noqa: E402
+    MAX_INTENTS_PER_CALL,
+    CallState,
+    Intent,
+    ResolutionStatus,
+    Slot,
+    SlotStatus,
+    Stage,
+)
 
 BASE = "BASE PERSONA TEXT"
 
@@ -420,6 +429,102 @@ def test_route_to_order_status_carries_the_base_persona(setup):
     order_status = asyncio.run(agent.route_to_order_status(ctx))
 
     assert BASE in order_status.instructions
+
+
+# --------------------------------------------------------------------------
+# RouterAgent.set_intent (M4)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def router_setup():
+    log = EventLog()
+    state = CallState(call_id="c_test_router")
+    state.stage = Stage.ROUTE
+    agent = RouterAgent(base_instructions=BASE, event_log=log)
+    return agent, _Ctx(state), state, log
+
+
+def test_set_intent_refuses_an_unrecognised_value(router_setup):
+    agent, ctx, state, log = router_setup
+    result = asyncio.run(agent.set_intent(ctx, "not_a_real_intent", "customer asked something"))
+
+    assert isinstance(result, str)
+    assert state.active_intent is None
+    assert state.intents_handled == []
+    assert not [e for e in log.events if e.type is EventType.AGENT_HANDOFF]
+
+
+def test_set_intent_order_status_hands_off_and_records_slots(router_setup):
+    agent, ctx, state, log = router_setup
+    result = asyncio.run(agent.set_intent(ctx, "order_status", "wants to know where an order is"))
+
+    assert isinstance(result, OrderStatusAgent)
+    assert state.stage is Stage.RESOLVE
+    assert state.active_intent is Intent.ORDER_STATUS
+    assert Intent.ORDER_STATUS in state.intents_handled
+    assert state.router.intent.value == "order_status"
+    assert state.router.intent_reason.value == "wants to know where an order is"
+
+    handoffs = [e for e in log.events if e.type is EventType.AGENT_HANDOFF]
+    assert len(handoffs) == 1
+    assert handoffs[0].payload == {"from": "RouterAgent", "to": "OrderStatusAgent"}
+
+    slot_sets = [e for e in log.events if e.type is EventType.SLOT_SET]
+    assert {e.payload["slot"] for e in slot_sets} == {"intent", "intent_reason"}
+
+
+def test_set_intent_carries_the_base_persona(router_setup):
+    agent, ctx, _, _ = router_setup
+    order_status = asyncio.run(agent.set_intent(ctx, "order_status", "order question"))
+
+    assert BASE in order_status.instructions
+
+
+def test_set_intent_for_a_not_yet_built_intent_stays_in_router(router_setup):
+    """M5 builds product_info/returns_refund/subscription/complaint/fallback;
+    this slice only wires order_status to a real handoff."""
+    agent, ctx, state, log = router_setup
+    result = asyncio.run(agent.set_intent(ctx, "product_info", "asking about a product"))
+
+    assert isinstance(result, str)  # stays in Router, no handoff
+    assert state.stage is Stage.ROUTE
+    assert state.active_intent is None
+    assert not [e for e in log.events if e.type is EventType.AGENT_HANDOFF]
+    # The slot is still recorded even though there is nowhere to route yet.
+    assert state.router.intent.value == "product_info"
+
+
+def test_set_intent_past_the_cap_routes_to_wrap_without_raising(router_setup):
+    agent, ctx, state, log = router_setup
+    for intent in (Intent.ORDER_STATUS, Intent.PRODUCT_INFO, Intent.COMPLAINT):
+        state.start_intent(intent)
+    assert len(state.intents_handled) == MAX_INTENTS_PER_CALL
+
+    result = asyncio.run(agent.set_intent(ctx, "subscription", "wants to change a plan"))
+
+    assert isinstance(result, WrapAgent)
+    assert state.stage is Stage.WRAP
+    assert Intent.SUBSCRIPTION not in state.intents_handled  # cap held: never started
+    assert len(state.intents_handled) == MAX_INTENTS_PER_CALL
+
+    handoffs = [e for e in log.events if e.type is EventType.AGENT_HANDOFF]
+    assert len(handoffs) == 1
+    assert handoffs[0].payload == {"from": "RouterAgent", "to": "WrapAgent"}
+
+
+def test_set_intent_past_the_cap_still_allows_re_entering_a_handled_intent(router_setup):
+    """can_start_intent's documented re-entry allowance (the cap counts
+    distinct intents, not visits) holds through the real Router path."""
+    agent, ctx, state, log = router_setup
+    for intent in (Intent.ORDER_STATUS, Intent.PRODUCT_INFO, Intent.COMPLAINT):
+        state.start_intent(intent)
+
+    result = asyncio.run(agent.set_intent(ctx, "order_status", "same thing again"))
+
+    assert isinstance(result, OrderStatusAgent)
+    assert state.active_intent is Intent.ORDER_STATUS
+    assert len(state.intents_handled) == MAX_INTENTS_PER_CALL  # unchanged, not re-added
 
 
 # --------------------------------------------------------------------------
