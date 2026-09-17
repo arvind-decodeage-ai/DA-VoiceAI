@@ -46,7 +46,7 @@ from config import get_settings
 from events import EventLog, EventType
 from output import build_call_json
 from persistence import finalize_call, start_call
-from state import CallState
+from state import CallState, ResolutionStatus, Stage
 
 load_dotenv()
 
@@ -96,6 +96,90 @@ def turn_event_for_item(
             "spoken_at": spoken_at,
         }
     return None
+
+
+# --------------------------------------------------------------------------
+# Deviation #8 (state.py: FORCE_WRAP_AFTER, CallState.should_force_wrap) —
+# forced call-duration close. Kept at module level, not as entrypoint()
+# closures, specifically so it's unit-testable the same way
+# turn_event_for_item is above: entrypoint() sets up a real LiveKit session
+# and can't sensibly run in a unit test, so anything that needs a test lives
+# outside it and takes what it needs as arguments.
+# --------------------------------------------------------------------------
+
+WRAP_FORCED_CLOSING_LINE = (
+    "Thank you for calling Decode Age. If there's anything else or if this "
+    "needs a closer look, please feel free to call this number again and "
+    "we'll be happy to help — or connect you with a member of our team. "
+    "Take care!"
+)
+
+
+async def do_forced_wrap(
+    session: AgentSession, event_log: EventLog, call_state: CallState
+) -> None:
+    """The deterministic forced-close flow: speak the fixed closing line with
+    barge-in suppressed for this one generation only (not session-wide), wait
+    for it to finish playing, then close — mirroring WrapAgent.end_call's own
+    wait_for_playout -> log CALL_ENDED -> aclose ordering, but bypassing
+    WrapAgent entirely: no handoff, no LLM turn, no LLM paraphrasing of the
+    closing line.
+
+    Slots are left exactly as they are — no retroactive UNAVAILABLE marking
+    on whatever intent was in flight. The incomplete state honestly reflects
+    a call cut short by the duration cap, rather than pretending it captured
+    something it did not.
+    """
+    if any(e.type is EventType.CALL_ENDED for e in event_log):
+        # Already ending some other way (e.g. WrapAgent.end_call fired in the
+        # same turn that also crossed the cap) — nothing to do.
+        return
+
+    handle = session.say(WRAP_FORCED_CLOSING_LINE, allow_interruptions=False)
+    await handle.wait_for_playout()
+
+    call_state.stage = Stage.WRAP
+    call_state.resolution.status = ResolutionStatus.WRAP_FORCED
+    event_log.append(EventType.CALL_ENDED, {"reason": "wrap_forced"})
+
+    await session.aclose()
+
+
+class ForcedWrapScheduler:
+    """Schedules do_forced_wrap at most once per call.
+
+    A plain check-then-set against `self.task` is safe with no lock:
+    `maybe_schedule` is called synchronously from a sync event-handler
+    callback with no `await` between the check and the assignment, and
+    session.on(...) listeners run synchronously to completion inside
+    emit(), so a second conversation_item_added cannot begin running the
+    caller's handler until the current call has fully returned. asyncio's
+    single event-loop thread rules out any other interleaving. `task` is
+    never reset back to None: every path through do_forced_wrap ends the
+    call one way or another, so there is no case where a retry would be
+    correct.
+    """
+
+    def __init__(
+        self, *, session: AgentSession, event_log: EventLog, call_state: CallState
+    ) -> None:
+        self._session = session
+        self._event_log = event_log
+        self._call_state = call_state
+        self.task: asyncio.Task | None = None
+
+    def maybe_schedule(self, event_type: EventType) -> None:
+        # Checked only on agent turns (never mid-turn): a tool call in
+        # progress when the cap is crossed always finishes first, because
+        # this only ever runs once a turn has fully committed.
+        if event_type is not EventType.AGENT_TURN:
+            return
+        if not self._call_state.should_force_wrap():
+            return
+        if self.task is None:
+            self.task = asyncio.create_task(
+                do_forced_wrap(self._session, self._event_log, self._call_state)
+            )
 
 
 class TurnMetrics:
@@ -267,6 +351,13 @@ async def entrypoint(ctx: JobContext) -> None:
     last_final_language: dict[str, str | None] = {"value": None}
     last_spoke_at: dict[str, str | None] = {"value": None}
 
+    # Deviation #8 — see the module-level do_forced_wrap/ForcedWrapScheduler
+    # above (state.py: FORCE_WRAP_AFTER, should_force_wrap) for the mechanism
+    # and its rationale.
+    forced_wrap_scheduler = ForcedWrapScheduler(
+        session=session, event_log=event_log, call_state=call_state
+    )
+
     def _on_agent_state_for_log(ev: AgentStateChangedEvent) -> None:
         if ev.new_state == "speaking":
             last_spoke_at["value"] = datetime.fromtimestamp(
@@ -281,6 +372,7 @@ async def entrypoint(ctx: JobContext) -> None:
         )
         if mapped is not None:
             event_log.append(*mapped)
+            forced_wrap_scheduler.maybe_schedule(mapped[0])
 
     session.on("agent_state_changed", _on_agent_state_for_log)
     session.on("conversation_item_added", _on_conversation_item_added)

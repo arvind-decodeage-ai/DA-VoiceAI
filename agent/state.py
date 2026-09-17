@@ -20,7 +20,7 @@ this call. Which single value becomes the final JSON's top-level ``language``
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Optional
 
@@ -29,6 +29,19 @@ from pydantic import BaseModel, Field, field_validator
 # PRD §5 flow ("anything else, <3 intents") and §10 M5 ("Multi-intent up to 3
 # per call"). Not a §11 non-functional requirement.
 MAX_INTENTS_PER_CALL = 3
+
+# Deviation #8: a hard call-duration cap, not specified by PRD §11's NFRs.
+# Added deliberately — an unbounded "anything else?" Router loop-back (PRD §5)
+# has unbounded LLM/tool-call cost per call and is a free vector for someone to
+# tie up the agent indefinitely. Once FORCE_WRAP_AFTER elapses, the call is
+# forced toward a deterministic close (see should_force_wrap() below and the
+# forced-close flow in agent.py) instead of being allowed to keep looping.
+#
+# This is the same mechanism PRD §10 M6 already plans ("8 min ... caps") —
+# not a separate one. FORCE_WRAP_AFTER is kept as a single tunable constant
+# specifically so M6 changes the duration (3 min -> 8 min) without
+# restructuring should_force_wrap() or the forced-close flow it triggers.
+FORCE_WRAP_AFTER = timedelta(minutes=3)
 
 
 class Intent(str, Enum):
@@ -46,6 +59,12 @@ class ResolutionStatus(str, Enum):
     CALLBACK = "callback"
     ABANDONED = "abandoned"
     TIMEOUT = "timeout"
+    # Deviation #8 (see FORCE_WRAP_AFTER above): a call closed by the
+    # duration cap, not by TIMEOUT's existing meaning (STT/TTS/OpenRouter
+    # infra failure -> graceful exit, PRD §11). Named to describe the
+    # mechanism, not the existing TIMEOUT value, since the two causes are
+    # different and conflating them would lose that distinction in the data.
+    WRAP_FORCED = "wrap_forced"
 
 
 class Stage(str, Enum):
@@ -370,3 +389,10 @@ class CallState(BaseModel):
         if active is None:
             return False
         return active.is_complete()
+
+    def should_force_wrap(self) -> bool:
+        """Deviation #8 (see FORCE_WRAP_AFTER). True once the call has run at
+        or past the duration cap, regardless of stage or active intent — the
+        cap is a hard ceiling, not a stage-specific gate like the others here.
+        """
+        return datetime.now(timezone.utc) - self.started_at >= FORCE_WRAP_AFTER

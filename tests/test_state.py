@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 
 from state import (  # noqa: E402
+    FORCE_WRAP_AFTER,
     MAX_INTENTS_PER_CALL,
     CallState,
     GreetSlots,
@@ -221,6 +222,43 @@ def test_can_reenter_a_handled_intent_at_the_cap():
     assert state.can_start_intent(Intent.ORDER_STATUS) is True
     state.start_intent(Intent.ORDER_STATUS)
     assert state.active_intent is Intent.ORDER_STATUS
+
+
+# --------------------------------------------------------------------------
+# Deviation #8 — forced call-duration wrap
+# --------------------------------------------------------------------------
+
+
+def test_should_force_wrap_is_false_well_before_the_cap():
+    state = CallState(call_id="c_test")
+    assert state.should_force_wrap() is False
+
+
+def test_should_force_wrap_is_true_once_the_cap_has_elapsed():
+    state = CallState(
+        call_id="c_test",
+        started_at=datetime.now(timezone.utc) - FORCE_WRAP_AFTER - timedelta(seconds=1),
+    )
+    assert state.should_force_wrap() is True
+
+
+def test_should_force_wrap_boundary_is_inclusive():
+    """>=, not >: a call exactly at the cap is forced, not given a free turn."""
+    state = CallState(
+        call_id="c_test",
+        started_at=datetime.now(timezone.utc) - FORCE_WRAP_AFTER,
+    )
+    assert state.should_force_wrap() is True
+
+
+def test_should_force_wrap_ignores_stage_and_active_intent():
+    """The cap is a hard ceiling, not a stage-specific gate like the others."""
+    state = CallState(
+        call_id="c_test",
+        started_at=datetime.now(timezone.utc) - FORCE_WRAP_AFTER - timedelta(seconds=1),
+    )
+    state.start_intent(Intent.ORDER_STATUS)
+    assert state.should_force_wrap() is True
 
 
 # --------------------------------------------------------------------------
