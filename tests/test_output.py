@@ -67,7 +67,27 @@ def test_full_conversation_validates(validator):
 
 
 def test_richly_populated_call_validates(validator):
-    log = _conversation()
+    log = EventLog()
+    log.append(EventType.CALL_STARTED, {"room": "c_test"})
+    log.append(EventType.AGENT_TURN, {"text": "How can I help?", "interrupted": False})
+    log.append(EventType.USER_TURN, {"text": "Where is my order?", "language": "en-IN"})
+    log.append(EventType.AGENT_TURN, {"text": "What is the order number?", "interrupted": False})
+    log.append(EventType.USER_TURN, {"text": "ORD-1", "language": "en-IN"})
+    # Exercises the tool_calls[].result wrapped-string shape (M4 Gate 2)
+    # against the real schema, not just this file's own assertions — placed
+    # in the window _build_qa actually attributes to an answer (after it,
+    # before the next turn), not appended at the end where it would land
+    # outside every qa entry's window and never reach the validator at all.
+    log.append(
+        EventType.TOOL_CALL,
+        {
+            "name": "lookup_order",
+            "args": {"order_id": "ORD-1"},
+            "result": {"text": "Order ORD-1: financial status paid."},
+        },
+    )
+    log.append(EventType.AGENT_TURN, {"text": "Noted, thank you.", "interrupted": False})
+    log.append(EventType.CALL_ENDED)
     log.append(EventType.CSAT_RECORDED, {"csat": 4})
     state = _state()
     state.caller.name = "Arvind"
@@ -77,7 +97,18 @@ def test_richly_populated_call_validates(validator):
     state.greet.identity_confirmed = Slot.mark_unavailable()
     state.resolution.status = ResolutionStatus.RESOLVED
     state.resolution.summary = "Noted the order number."
-    validator.validate(build_call_json(log, state))
+    doc = build_call_json(log, state)
+    # Confirms the tool call actually landed in a qa entry (not merely that
+    # the document validates, which would pass vacuously if it landed
+    # nowhere).
+    assert doc["qa"][1]["tool_calls"] == [
+        {
+            "name": "lookup_order",
+            "args": {"order_id": "ORD-1"},
+            "result": {"text": "Order ORD-1: financial status paid."},
+        }
+    ]
+    validator.validate(doc)
 
 
 def test_later_milestone_fields_are_present_but_empty(validator):
@@ -162,8 +193,64 @@ def test_slot_set_between_answer_and_next_turn_is_attributed_to_that_answer():
     assert qa[1]["slot"] is None  # no slot_set followed the second answer
 
 
-def test_tool_calls_are_empty_until_m4():
+def test_tool_calls_default_to_empty_when_none_occurred():
     assert all(entry["tool_calls"] == [] for entry in build_call_json(_conversation(), _state())["qa"])
+
+
+def test_tool_call_between_answer_and_next_turn_is_attributed_to_that_answer():
+    log = EventLog()
+    log.append(EventType.AGENT_TURN, {"text": "What is the order number?", "interrupted": False})
+    log.append(EventType.USER_TURN, {"text": "52428", "language": "en-IN"})
+    log.append(
+        EventType.TOOL_CALL,
+        {
+            "name": "lookup_order",
+            "args": {"order_id": "52428"},
+            "result": {"text": "Order 52428: financial status paid."},
+        },
+    )
+    log.append(EventType.AGENT_TURN, {"text": "Your order is paid.", "interrupted": False})
+    log.append(EventType.USER_TURN, {"text": "thanks", "language": "en-IN"})
+
+    qa = build_call_json(log, _state())["qa"]
+    assert qa[0]["tool_calls"] == [
+        {
+            "name": "lookup_order",
+            "args": {"order_id": "52428"},
+            "result": {"text": "Order 52428: financial status paid."},
+        }
+    ]
+    assert qa[1]["tool_calls"] == []  # no tool call followed the second answer
+
+
+def test_multiple_tool_calls_for_one_answer_all_attach_in_order():
+    log = EventLog()
+    log.append(EventType.AGENT_TURN, {"text": "Let me check.", "interrupted": False})
+    log.append(EventType.USER_TURN, {"text": "ORD-1", "language": "en-IN"})
+    log.append(EventType.TOOL_CALL, {"name": "lookup_order", "args": {}, "result": {"text": "first"}})
+    log.append(EventType.TOOL_CALL, {"name": "lookup_order", "args": {}, "result": {"text": "second"}})
+    log.append(EventType.AGENT_TURN, {"text": "Done.", "interrupted": False})
+
+    qa = build_call_json(log, _state())["qa"]
+    assert [c["result"]["text"] for c in qa[0]["tool_calls"]] == ["first", "second"]
+
+
+def test_tool_call_error_result_is_a_found_false_object():
+    log = EventLog()
+    log.append(EventType.AGENT_TURN, {"text": "What is the order number?", "interrupted": False})
+    log.append(EventType.USER_TURN, {"text": "99999", "language": "en-IN"})
+    log.append(
+        EventType.TOOL_CALL,
+        {
+            "name": "lookup_order",
+            "args": {"order_id": "99999"},
+            "result": {"found": False, "reason": "connection refused"},
+        },
+    )
+    log.append(EventType.AGENT_TURN, {"text": "I couldn't look that up.", "interrupted": False})
+
+    qa = build_call_json(log, _state())["qa"]
+    assert qa[0]["tool_calls"][0]["result"] == {"found": False, "reason": "connection refused"}
 
 
 # --------------------------------------------------------------------------

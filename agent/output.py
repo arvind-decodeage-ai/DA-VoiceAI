@@ -143,6 +143,24 @@ def _slot_for_answer(log: EventLog, answer: Event) -> Optional[str]:
     return None
 
 
+def _tool_calls_for_answer(log: EventLog, answer: Event) -> list[dict[str, Any]]:
+    """Tool calls this qa entry's exchange made, if any.
+
+    Same window ``_slot_for_answer`` already searches — after the answer,
+    before the next turn-bearing event — since a tool call (M4 Gate 2: the
+    session's ``tool_execution_updated`` wiring) happens in exactly that gap,
+    between a customer's answer committing and the agent's next reply.
+    """
+    after = [e for e in log.events if e.seq > answer.seq]
+    calls: list[dict[str, Any]] = []
+    for event in after:
+        if event.turn_idx is not None:
+            break  # reached the next turn; stop looking
+        if event.type is EventType.TOOL_CALL:
+            calls.append(dict(event.payload))
+    return calls
+
+
 def _build_qa(log: EventLog) -> list[dict[str, Any]]:
     """Pair each agent question with the answer that followed it.
 
@@ -175,7 +193,7 @@ def _build_qa(log: EventLog) -> list[dict[str, Any]]:
                 # M6 output filter's job; until then this is the identity.
                 "answer_normalized": answer_raw.strip(),
                 "slot": _slot_for_answer(log, event),
-                "tool_calls": [],  # tool_call events have no producer until M4
+                "tool_calls": _tool_calls_for_answer(log, event),
                 "ts": event.ts.isoformat(),
             }
         )

@@ -21,6 +21,7 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import statistics
 from datetime import datetime, timezone
@@ -31,6 +32,9 @@ from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
 from livekit.agents.voice.events import (
     AgentStateChangedEvent,
     ConversationItemAddedEvent,
+    ToolCallEnded,
+    ToolCallStarted,
+    ToolExecutionUpdatedEvent,
     UserInputTranscribedEvent,
     UserStateChangedEvent,
 )
@@ -96,6 +100,66 @@ def turn_event_for_item(
             "spoken_at": spoken_at,
         }
     return None
+
+
+# --------------------------------------------------------------------------
+# M4 Gate 2 — TOOL_CALL events
+#
+# The framework emits ToolCallStarted once when a function_tool call is
+# dispatched and ToolCallEnded exactly once when its task's single terminal
+# done-callback runs (livekit.agents.voice.tool_executor: add_done_callback,
+# an asyncio.Task guarantee, fires once regardless of a normal return, a
+# raised exception, or cancellation). Logging only on Ended — never on
+# Started — is what makes this safe: nothing is recorded until the outcome
+# (success, error, or cancelled) is already known, so a call can never be
+# logged as "made" without also capturing how it actually ended, and there is
+# no separate "started" entry that could go unmatched or double up.
+# --------------------------------------------------------------------------
+
+
+def record_tool_call_started(
+    pending: dict[str, tuple[str, str]], update: ToolCallStarted
+) -> None:
+    """Stash a started call's name and raw (JSON-string) arguments, keyed by
+    call_id, until its terminal ToolCallEnded arrives. Same staged-dict shape
+    as last_final_language/last_spoke_at below."""
+    pending[update.function_call.call_id] = (
+        update.function_call.name,
+        update.function_call.arguments,
+    )
+
+
+def tool_call_event_for_ended(
+    pending: dict[str, tuple[str, str]], update: ToolCallEnded
+) -> tuple[EventType, dict] | None:
+    """The one TOOL_CALL event for a finished call, or None if its
+    ToolCallStarted was never recorded (defensive: the framework always fires
+    Started before the task's single terminal callback runs, so this should
+    not happen in practice).
+
+    Interpretation of PRD §8's underspecified tool_calls[] shape (name, args,
+    result — exactly three keys, no more added; approved M4 Gate 1 decision):
+    `args` is the parsed argument dict, not the raw JSON string the LLM sent.
+    `result` is always an object, matching call_output.schema.json's strict
+    "type": "object" — on success, {"text": <the tool's actual return value>}
+    (lookup_order returns a plain string; wrapped, not coerced or dropped, per
+    the approved Gate 2 decision reconciling that string against the
+    object-only schema); on a genuine execution failure (lookup_order's DB
+    call raising, or the framework cancelling the call),
+    {"found": False, "reason": <message or status>} — calibrated to
+    lookup_order/DB-style tools, consistent with its own "not found" return
+    (a plain message, never an exception).
+    """
+    stashed = pending.pop(update.call_id, None)
+    if stashed is None:
+        return None
+    name, raw_arguments = stashed
+    args = json.loads(raw_arguments) if raw_arguments else {}
+    if update.status == "done":
+        result: dict = {"text": update.message}
+    else:
+        result = {"found": False, "reason": update.message or update.status}
+    return EventType.TOOL_CALL, {"name": name, "args": args, "result": result}
 
 
 # --------------------------------------------------------------------------
@@ -376,6 +440,20 @@ async def entrypoint(ctx: JobContext) -> None:
 
     session.on("agent_state_changed", _on_agent_state_for_log)
     session.on("conversation_item_added", _on_conversation_item_added)
+
+    # M4 Gate 2 — see record_tool_call_started/tool_call_event_for_ended above
+    # for the mechanism and the PRD §8 shape interpretation.
+    pending_tool_calls: dict[str, tuple[str, str]] = {}
+
+    def _on_tool_execution_updated(ev: ToolExecutionUpdatedEvent) -> None:
+        if isinstance(ev.update, ToolCallStarted):
+            record_tool_call_started(pending_tool_calls, ev.update)
+        elif isinstance(ev.update, ToolCallEnded):
+            mapped = tool_call_event_for_ended(pending_tool_calls, ev.update)
+            if mapped is not None:
+                event_log.append(*mapped)
+
+    session.on("tool_execution_updated", _on_tool_execution_updated)
 
     metrics = TurnMetrics()
     session.on("user_state_changed", metrics.on_user_state_changed)

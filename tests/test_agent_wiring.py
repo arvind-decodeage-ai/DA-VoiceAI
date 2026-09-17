@@ -15,7 +15,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from livekit.agents.llm import ChatMessage
+from livekit.agents.llm import ChatMessage, FunctionCall
+from livekit.agents.voice.events import ToolCallEnded, ToolCallStarted
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 
@@ -23,6 +24,8 @@ from agent import (  # noqa: E402
     WRAP_FORCED_CLOSING_LINE,
     ForcedWrapScheduler,
     do_forced_wrap,
+    record_tool_call_started,
+    tool_call_event_for_ended,
     turn_event_for_item,
 )
 from events import EventLog, EventType  # noqa: E402
@@ -119,6 +122,107 @@ def test_mapped_events_append_cleanly_and_carry_turn_idx():
     ]
     assert [e.turn_idx for e in log.events] == [1, 2, 3]
     assert [e.payload.get("interrupted") for e in log.events] == [False, None, True]
+
+
+# --------------------------------------------------------------------------
+# M4 Gate 2 — TOOL_CALL events
+# --------------------------------------------------------------------------
+
+
+def _started(name: str, call_id: str, arguments: str) -> ToolCallStarted:
+    return ToolCallStarted(
+        function_call=FunctionCall(call_id=call_id, name=name, arguments=arguments)
+    )
+
+
+def _ended(call_id: str, *, status: str, message: str | None) -> ToolCallEnded:
+    return ToolCallEnded(id=call_id, call_id=call_id, message=message, status=status)
+
+
+def test_record_tool_call_started_stashes_name_and_raw_arguments():
+    pending: dict[str, tuple[str, str]] = {}
+    record_tool_call_started(
+        pending, _started("lookup_order", "call_1", '{"order_id": "52428"}')
+    )
+    assert pending == {"call_1": ("lookup_order", '{"order_id": "52428"}')}
+
+
+def test_tool_call_event_for_ended_returns_none_for_an_unknown_call_id():
+    """Defensive: the framework always fires Started before Ended, so this
+    should not happen in practice, but a stray Ended must not fabricate an
+    event out of nothing."""
+    pending: dict[str, tuple[str, str]] = {}
+    assert tool_call_event_for_ended(pending, _ended("call_1", status="done", message="ok")) is None
+
+
+def test_tool_call_event_for_ended_pops_the_pending_entry():
+    """A second Ended for the same call_id (should not happen) finds nothing
+    left to match, rather than logging the call twice."""
+    pending = {"call_1": ("lookup_order", "{}")}
+    tool_call_event_for_ended(pending, _ended("call_1", status="done", message="ok"))
+    assert pending == {}
+
+
+def test_tool_call_event_for_ended_parses_args_from_json():
+    pending = {"call_1": ("lookup_order", '{"order_id": "52428"}')}
+    _, payload = tool_call_event_for_ended(
+        pending, _ended("call_1", status="done", message="Order 52428: paid.")
+    )
+    assert payload["args"] == {"order_id": "52428"}
+
+
+def test_tool_call_event_for_ended_success_wraps_the_return_value():
+    pending = {"call_1": ("lookup_order", "{}")}
+    mapped = tool_call_event_for_ended(
+        pending, _ended("call_1", status="done", message="Order 52428: financial status paid.")
+    )
+    assert mapped is not None
+    event_type, payload = mapped
+    assert event_type is EventType.TOOL_CALL
+    assert payload["name"] == "lookup_order"
+    assert payload["result"] == {"text": "Order 52428: financial status paid."}
+
+
+def test_tool_call_event_for_ended_success_with_no_return_value_wraps_none():
+    """A handoff tool (route_to_router, set_intent, move_to_wrap, ...) returns
+    an Agent, not a string; the framework's own ToolCallEnded carries
+    message=None for it — still a successful call, still logged."""
+    pending = {"call_1": ("route_to_router", "{}")}
+    _, payload = tool_call_event_for_ended(pending, _ended("call_1", status="done", message=None))
+    assert payload["result"] == {"text": None}
+
+
+def test_tool_call_event_for_ended_error_produces_found_false_with_the_exception_message():
+    pending = {"call_1": ("lookup_order", '{"order_id": "52428"}')}
+    _, payload = tool_call_event_for_ended(
+        pending, _ended("call_1", status="error", message="connection refused")
+    )
+    assert payload["result"] == {"found": False, "reason": "connection refused"}
+
+
+def test_tool_call_event_for_ended_cancelled_falls_back_to_the_status_as_reason():
+    """ToolCallEnded carries message=None for a cancelled call; the status
+    itself is the only description available."""
+    pending = {"call_1": ("lookup_order", "{}")}
+    _, payload = tool_call_event_for_ended(pending, _ended("call_1", status="cancelled", message=None))
+    assert payload["result"] == {"found": False, "reason": "cancelled"}
+
+
+def test_tool_call_event_appends_cleanly_and_carries_no_turn_idx():
+    """tool_call is not a turn-bearing type (TURN_EVENT_TYPES), so it must not
+    advance or consume a turn_idx."""
+    log = EventLog()
+    pending: dict[str, tuple[str, str]] = {}
+    record_tool_call_started(
+        pending, _started("lookup_order", "call_1", '{"order_id": "52428"}')
+    )
+    mapped = tool_call_event_for_ended(
+        pending, _ended("call_1", status="done", message="Order 52428: paid.")
+    )
+    assert mapped is not None
+    event = log.append(*mapped)
+    assert event.turn_idx is None
+    assert event.type is EventType.TOOL_CALL
 
 
 # --------------------------------------------------------------------------
