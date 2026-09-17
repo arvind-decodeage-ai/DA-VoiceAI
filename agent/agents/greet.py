@@ -16,10 +16,12 @@ from __future__ import annotations
 from livekit.agents import Agent, RunContext, function_tool
 
 from agents import compose_instructions
+from agents.order_status import NAME as ORDER_STATUS_NAME
+from agents.order_status import OrderStatusAgent
 from agents.wrap import NAME as WRAP_NAME
 from agents.wrap import WrapAgent
 from events import EventLog, EventType
-from state import CallState, Slot, Stage
+from state import CallState, Intent, Slot, Stage
 
 NAME = "GreetAgent"
 
@@ -99,5 +101,32 @@ class GreetAgent(Agent):
         )
         state.stage = Stage.WRAP
         return WrapAgent(
+            base_instructions=self._base_instructions, event_log=self._log
+        )
+
+    @function_tool
+    async def route_to_order_status(self, ctx: RunContext[CallState]) -> "Agent | str":
+        """Move to looking up an order, once the customer has asked about one.
+
+        Call this when the customer wants to know about an order — its status,
+        or tracking.
+        """
+        state = ctx.userdata
+        # Same identity gate as move_to_wrap: PRD §5 identifies the customer
+        # before moving on to anything else, and this reuses that exact check
+        # rather than inventing a second one.
+        if not state.can_leave_stage():
+            missing = ", ".join(state.blocking_slots())
+            return (
+                f"Not yet — still missing: {missing}. Ask the customer for it "
+                f"first, then call this again."
+            )
+
+        state.start_intent(Intent.ORDER_STATUS)
+        state.stage = Stage.RESOLVE
+        self._log.append(
+            EventType.AGENT_HANDOFF, {"from": NAME, "to": ORDER_STATUS_NAME}
+        )
+        return OrderStatusAgent(
             base_instructions=self._base_instructions, event_log=self._log
         )

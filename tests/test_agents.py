@@ -17,9 +17,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 
 from agents import compose_instructions, stage_prompt  # noqa: E402
 from agents.greet import GreetAgent  # noqa: E402
+from agents.order_status import OrderStatusAgent  # noqa: E402
 from agents.wrap import WrapAgent  # noqa: E402
 from events import EventLog, EventType  # noqa: E402
-from state import CallState, ResolutionStatus, Slot, SlotStatus, Stage  # noqa: E402
+from state import CallState, Intent, ResolutionStatus, Slot, SlotStatus, Stage  # noqa: E402
 
 BASE = "BASE PERSONA TEXT"
 
@@ -379,3 +380,43 @@ def test_the_full_wrap_sequence_produces_a_complete_document(wrap_setup):
     assert doc["csat"] == 4
     assert doc["ended_at"] is not None
     assert state.wrap.is_complete()  # both PRD §5 wrap slots captured
+
+
+# --------------------------------------------------------------------------
+# Greet -> OrderStatus routing (order-lookup slice)
+# --------------------------------------------------------------------------
+
+
+def test_route_to_order_status_is_refused_before_identity_is_confirmed(setup):
+    agent, ctx, state, log = setup
+    result = asyncio.run(agent.route_to_order_status(ctx))
+
+    assert isinstance(result, str)  # a message back to the model, not a handoff
+    assert "identity_confirmed" in result and "name" in result
+    assert state.stage is Stage.GREET
+    assert not [e for e in log.events if e.type is EventType.AGENT_HANDOFF]
+
+
+def test_route_to_order_status_succeeds_once_identity_is_confirmed(setup):
+    agent, ctx, state, log = setup
+    asyncio.run(agent.record_caller_name(ctx, "Arvind"))
+    asyncio.run(agent.confirm_identity(ctx, True))
+    result = asyncio.run(agent.route_to_order_status(ctx))
+
+    assert isinstance(result, OrderStatusAgent)  # returning an Agent performs the handoff
+    assert state.stage is Stage.RESOLVE
+    assert state.active_intent is Intent.ORDER_STATUS
+    assert Intent.ORDER_STATUS in state.intents_handled
+
+    handoffs = [e for e in log.events if e.type is EventType.AGENT_HANDOFF]
+    assert len(handoffs) == 1
+    assert handoffs[0].payload == {"from": "GreetAgent", "to": "OrderStatusAgent"}
+
+
+def test_route_to_order_status_carries_the_base_persona(setup):
+    agent, ctx, _, _ = setup
+    asyncio.run(agent.record_caller_name(ctx, "Arvind"))
+    asyncio.run(agent.confirm_identity(ctx, True))
+    order_status = asyncio.run(agent.route_to_order_status(ctx))
+
+    assert BASE in order_status.instructions
