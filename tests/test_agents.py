@@ -420,3 +420,54 @@ def test_route_to_order_status_carries_the_base_persona(setup):
     order_status = asyncio.run(agent.route_to_order_status(ctx))
 
     assert BASE in order_status.instructions
+
+
+# --------------------------------------------------------------------------
+# OrderStatusAgent -> Wrap handoff (order-lookup slice)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def order_status_setup():
+    log = EventLog()
+    state = CallState(call_id="c_test_order_status")
+    state.start_intent(Intent.ORDER_STATUS)
+    state.stage = Stage.RESOLVE
+    agent = OrderStatusAgent(base_instructions=BASE, event_log=log)
+    return agent, _Ctx(state), state, log
+
+
+def test_order_status_move_to_wrap_marks_issue_type_unavailable_and_succeeds(order_status_setup):
+    """No tool in this slice captures issue_type; the exit gate marks it
+    UNAVAILABLE itself (same 'asked, nothing to give' semantics as Greet's
+    identity_confirmed) rather than inventing a second gate mechanism."""
+    agent, ctx, state, log = order_status_setup
+    state.slots.order_status.order_id = Slot.fill("52428")
+
+    result = asyncio.run(agent.move_to_wrap(ctx))
+
+    assert isinstance(result, WrapAgent)
+    assert state.stage is Stage.WRAP
+    assert state.slots.order_status.issue_type.status == SlotStatus.UNAVAILABLE
+
+    handoffs = [e for e in log.events if e.type is EventType.AGENT_HANDOFF]
+    assert len(handoffs) == 1
+    assert handoffs[0].payload == {"from": "OrderStatusAgent", "to": "WrapAgent"}
+
+
+def test_order_status_move_to_wrap_is_refused_before_order_id_is_resolved(order_status_setup):
+    agent, ctx, state, log = order_status_setup
+    result = asyncio.run(agent.move_to_wrap(ctx))
+
+    assert isinstance(result, str)
+    assert "order_id" in result
+    assert state.stage is Stage.RESOLVE
+    assert not [e for e in log.events if e.type is EventType.AGENT_HANDOFF]
+
+
+def test_order_status_move_to_wrap_carries_the_base_persona(order_status_setup):
+    agent, ctx, state, _ = order_status_setup
+    state.slots.order_status.order_id = Slot.fill("52428")
+    wrap = asyncio.run(agent.move_to_wrap(ctx))
+
+    assert BASE in wrap.instructions

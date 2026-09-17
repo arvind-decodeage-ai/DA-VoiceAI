@@ -13,10 +13,12 @@ import psycopg
 from livekit.agents import Agent, RunContext, function_tool
 
 from agents import compose_instructions
+from agents.wrap import NAME as WRAP_NAME
+from agents.wrap import WrapAgent
 from config import get_settings
 from events import EventLog, EventType
 from shopify_data import get_order
-from state import CallState, Slot
+from state import CallState, Slot, Stage
 
 NAME = "OrderStatusAgent"
 
@@ -24,6 +26,7 @@ NAME = "OrderStatusAgent"
 class OrderStatusAgent(Agent):
     def __init__(self, *, base_instructions: str, event_log: EventLog) -> None:
         super().__init__(instructions=compose_instructions(base_instructions, "order_status"))
+        self._base_instructions = base_instructions
         self._log = event_log
 
     @function_tool
@@ -54,6 +57,37 @@ class OrderStatusAgent(Agent):
         )
 
         return _format_order_summary(order)
+
+    @function_tool
+    async def move_to_wrap(self, ctx: RunContext[CallState]) -> "Agent | str":
+        """Move to closing the call, once the order question is resolved.
+
+        Call this when the customer is done with this order question.
+        """
+        state = ctx.userdata
+        # This slice has no tool that captures `issue_type` (no issue-type
+        # capture was built here — see the task breakdown). Marking it
+        # UNAVAILABLE reuses the existing "asked, nothing to give" semantics
+        # (same as Greet's identity_confirmed) so the real code-enforced gate
+        # can still resolve, rather than inventing a second gate mechanism.
+        slots = state.slots.order_status
+        if not slots.issue_type.is_resolved:
+            slots.issue_type = Slot.mark_unavailable()
+
+        if not state.can_leave_stage():
+            missing = ", ".join(state.blocking_slots())
+            return (
+                f"Not yet — still missing: {missing}. Ask the customer for it "
+                f"first, then call this again."
+            )
+
+        self._log.append(
+            EventType.AGENT_HANDOFF, {"from": NAME, "to": WRAP_NAME}
+        )
+        state.stage = Stage.WRAP
+        return WrapAgent(
+            base_instructions=self._base_instructions, event_log=self._log
+        )
 
 
 def _format_order_summary(order: dict[str, Any]) -> str:
