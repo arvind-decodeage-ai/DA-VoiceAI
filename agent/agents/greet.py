@@ -16,12 +16,12 @@ from __future__ import annotations
 from livekit.agents import Agent, RunContext, function_tool
 
 from agents import compose_instructions
-from agents.order_status import NAME as ORDER_STATUS_NAME
-from agents.order_status import OrderStatusAgent
+from agents.router import NAME as ROUTER_NAME
+from agents.router import RouterAgent
 from agents.wrap import NAME as WRAP_NAME
 from agents.wrap import WrapAgent
 from events import EventLog, EventType
-from state import CallState, Intent, Slot, Stage
+from state import CallState, Slot, Stage
 
 NAME = "GreetAgent"
 
@@ -105,11 +105,11 @@ class GreetAgent(Agent):
         )
 
     @function_tool
-    async def route_to_order_status(self, ctx: RunContext[CallState]) -> "Agent | str":
-        """Move to looking up an order, once the customer has asked about one.
+    async def route_to_router(self, ctx: RunContext[CallState]) -> "Agent | str":
+        """Move to finding out what the customer needs help with.
 
-        Call this when the customer wants to know about an order — its status,
-        or tracking.
+        Call this once identity is confirmed and the customer has something
+        they want help with.
         """
         state = ctx.userdata
         # Same identity gate as move_to_wrap: PRD §5 identifies the customer
@@ -122,11 +122,10 @@ class GreetAgent(Agent):
                 f"first, then call this again."
             )
 
-        state.start_intent(Intent.ORDER_STATUS)
-        state.stage = Stage.RESOLVE
         self._log.append(
-            EventType.AGENT_HANDOFF, {"from": NAME, "to": ORDER_STATUS_NAME}
+            EventType.AGENT_HANDOFF, {"from": NAME, "to": ROUTER_NAME}
         )
-        return OrderStatusAgent(
+        state.stage = Stage.ROUTE
+        return RouterAgent(
             base_instructions=self._base_instructions, event_log=self._log
         )

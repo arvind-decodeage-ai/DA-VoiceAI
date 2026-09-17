@@ -392,13 +392,13 @@ def test_the_full_wrap_sequence_produces_a_complete_document(wrap_setup):
 
 
 # --------------------------------------------------------------------------
-# Greet -> OrderStatus routing (order-lookup slice)
+# Greet -> Router handoff (M4)
 # --------------------------------------------------------------------------
 
 
-def test_route_to_order_status_is_refused_before_identity_is_confirmed(setup):
+def test_route_to_router_is_refused_before_identity_is_confirmed(setup):
     agent, ctx, state, log = setup
-    result = asyncio.run(agent.route_to_order_status(ctx))
+    result = asyncio.run(agent.route_to_router(ctx))
 
     assert isinstance(result, str)  # a message back to the model, not a handoff
     assert "identity_confirmed" in result and "name" in result
@@ -406,29 +406,27 @@ def test_route_to_order_status_is_refused_before_identity_is_confirmed(setup):
     assert not [e for e in log.events if e.type is EventType.AGENT_HANDOFF]
 
 
-def test_route_to_order_status_succeeds_once_identity_is_confirmed(setup):
+def test_route_to_router_succeeds_once_identity_is_confirmed(setup):
     agent, ctx, state, log = setup
     asyncio.run(agent.record_caller_name(ctx, "Arvind"))
     asyncio.run(agent.confirm_identity(ctx, True))
-    result = asyncio.run(agent.route_to_order_status(ctx))
+    result = asyncio.run(agent.route_to_router(ctx))
 
-    assert isinstance(result, OrderStatusAgent)  # returning an Agent performs the handoff
-    assert state.stage is Stage.RESOLVE
-    assert state.active_intent is Intent.ORDER_STATUS
-    assert Intent.ORDER_STATUS in state.intents_handled
+    assert isinstance(result, RouterAgent)  # returning an Agent performs the handoff
+    assert state.stage is Stage.ROUTE
 
     handoffs = [e for e in log.events if e.type is EventType.AGENT_HANDOFF]
     assert len(handoffs) == 1
-    assert handoffs[0].payload == {"from": "GreetAgent", "to": "OrderStatusAgent"}
+    assert handoffs[0].payload == {"from": "GreetAgent", "to": "RouterAgent"}
 
 
-def test_route_to_order_status_carries_the_base_persona(setup):
+def test_route_to_router_carries_the_base_persona(setup):
     agent, ctx, _, _ = setup
     asyncio.run(agent.record_caller_name(ctx, "Arvind"))
     asyncio.run(agent.confirm_identity(ctx, True))
-    order_status = asyncio.run(agent.route_to_order_status(ctx))
+    router = asyncio.run(agent.route_to_router(ctx))
 
-    assert BASE in order_status.instructions
+    assert BASE in router.instructions
 
 
 # --------------------------------------------------------------------------
