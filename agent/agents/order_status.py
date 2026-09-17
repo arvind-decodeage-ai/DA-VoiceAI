@@ -40,6 +40,19 @@ class OrderStatusAgent(Agent):
         state = ctx.userdata
         order_number = order_id.strip().lstrip("#")
 
+        # B1 fix (live call c_4524e2408263): order_id records that the customer
+        # gave us a number to work with, unconditional on whether it resolved
+        # to a real order — a not-found lookup is a completed attempt at this
+        # slot, not "never asked". Filling it only on the success branch (as
+        # this used to do) left order_id permanently PENDING after any
+        # not-found lookup, so move_to_wrap could never leave the stage for a
+        # customer whose order number simply didn't match one on file.
+        state.slots.order_status.order_id = Slot.fill(order_id)
+        self._log.append(
+            EventType.SLOT_SET,
+            {"slot": "order_id", "value": order_id, "by_agent": NAME},
+        )
+
         settings = get_settings()
         with psycopg.connect(settings.database_url, connect_timeout=5) as conn:
             order = get_order(conn, order_number)
@@ -49,12 +62,6 @@ class OrderStatusAgent(Agent):
                 f"No order found with number {order_id}. Ask the customer to "
                 f"double-check the order number."
             )
-
-        state.slots.order_status.order_id = Slot.fill(order_id)
-        self._log.append(
-            EventType.SLOT_SET,
-            {"slot": "order_id", "value": order_id, "by_agent": NAME},
-        )
 
         return _format_order_summary(order)
 

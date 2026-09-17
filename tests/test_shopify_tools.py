@@ -28,9 +28,10 @@ load_dotenv(REPO / ".env")
 import psycopg  # noqa: E402
 
 from agents.order_status import OrderStatusAgent  # noqa: E402
+from agents.wrap import WrapAgent  # noqa: E402
 from events import EventLog, EventType  # noqa: E402
 from shopify_data import get_order  # noqa: E402
-from state import CallState, SlotStatus  # noqa: E402
+from state import CallState, Intent, SlotStatus, Stage  # noqa: E402
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
@@ -144,7 +145,13 @@ def test_lookup_order_tool_strips_leading_hash(sample_order_number):
     assert state.slots.order_status.order_id.status == SlotStatus.FILLED
 
 
-def test_lookup_order_tool_not_found_message_and_no_slot_fill():
+def test_lookup_order_tool_not_found_message_still_fills_the_slot():
+    """B1 fix: order_id records that the customer gave us a number to work
+    with, regardless of whether it resolved to a real order — a not-found
+    lookup is still a real, completed attempt, not "never asked". Before the
+    fix, order_id stayed PENDING here, which is exactly the bug that left
+    move_to_wrap permanently blocked on a not-found order (see the
+    move_to_wrap test below)."""
     log = EventLog()
     state = CallState(call_id="c_test_order_lookup_missing")
     agent = OrderStatusAgent(base_instructions=BASE, event_log=log)
@@ -152,5 +159,36 @@ def test_lookup_order_tool_not_found_message_and_no_slot_fill():
     result = asyncio.run(agent.lookup_order(_Ctx(state), NOT_A_REAL_ORDER_NUMBER))
 
     assert "no order found" in result.lower()
-    assert state.slots.order_status.order_id.status == SlotStatus.PENDING
-    assert not [e for e in log.events if e.type is EventType.SLOT_SET]
+    assert state.slots.order_status.order_id.status == SlotStatus.FILLED
+    assert state.slots.order_status.order_id.value == NOT_A_REAL_ORDER_NUMBER
+
+    slot_events = [e for e in log.events if e.type is EventType.SLOT_SET]
+    assert len(slot_events) == 1
+    assert slot_events[0].payload == {
+        "slot": "order_id",
+        "value": NOT_A_REAL_ORDER_NUMBER,
+        "by_agent": "OrderStatusAgent",
+    }
+
+
+def test_lookup_order_not_found_then_move_to_wrap_succeeds():
+    """B1: a real live-call bug (c_4524e2408263) — lookup_order was called
+    with a genuine order number that just didn't match any order, and
+    move_to_wrap then refused with "still missing: order_id" because
+    Slot.fill only ran on the success branch. A not-found lookup is still a
+    completed attempt at the slot, so move_to_wrap must be reachable
+    afterward (issue_type is marked UNAVAILABLE by move_to_wrap itself, same
+    as the found-order path)."""
+    log = EventLog()
+    state = CallState(call_id="c_test_order_lookup_missing_then_wrap")
+    state.start_intent(Intent.ORDER_STATUS)
+    state.stage = Stage.RESOLVE
+    agent = OrderStatusAgent(base_instructions=BASE, event_log=log)
+
+    asyncio.run(agent.lookup_order(_Ctx(state), NOT_A_REAL_ORDER_NUMBER))
+    result = asyncio.run(agent.move_to_wrap(_Ctx(state)))
+
+    assert isinstance(result, WrapAgent), (
+        "move_to_wrap refused with a string instead of handing off to Wrap "
+        f"(got: {result!r})"
+    )
