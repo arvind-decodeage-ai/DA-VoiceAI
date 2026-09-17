@@ -344,12 +344,13 @@ async def entrypoint(ctx: JobContext) -> None:
             # the plugin's argument would silently leave the reply uncapped. 300
             # sits comfortably above a ~25-word spoken turn (PRD §6 persona).
             extra_body={"max_tokens": 300},
-            # Carried over from the Groq/qwen setup, where "low" produced fuller
-            # replies than "none" on short filler inputs. deepseek-v4.1-flash
-            # lists reasoning_effort as supported, but this value has NOT been
-            # re-validated against it — revisit if replies come back terse or
-            # slow.
-            reasoning_effort="low",
+            # Deviation (Investigation A): reasoning_effort="low" was carried
+            # over from the Groq/qwen setup, unvalidated against
+            # deepseek-v4.1-flash. Removed, not swapped to another value:
+            # deepseek-v4.1-flash is a reasoning model, and this persona's
+            # ~25-word spoken turns get no benefit from paying for an extra
+            # reasoning layer regardless of the measured latency effect
+            # (see Investigation A, out/a3_probe_runs/, for the A/B).
         ),
         tts=SarvamTTS(
             model="bulbul:v3",
