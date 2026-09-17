@@ -574,3 +574,49 @@ def test_order_status_move_to_wrap_carries_the_base_persona(order_status_setup):
     wrap = asyncio.run(agent.move_to_wrap(ctx))
 
     assert BASE in wrap.instructions
+
+
+def test_order_status_move_to_router_marks_issue_type_unavailable_and_succeeds(order_status_setup):
+    agent, ctx, state, log = order_status_setup
+    state.slots.order_status.order_id = Slot.fill("52428")
+
+    result = asyncio.run(agent.move_to_router(ctx))
+
+    assert isinstance(result, RouterAgent)
+    assert state.stage is Stage.ROUTE
+    assert state.slots.order_status.issue_type.status == SlotStatus.UNAVAILABLE
+
+    handoffs = [e for e in log.events if e.type is EventType.AGENT_HANDOFF]
+    assert len(handoffs) == 1
+    assert handoffs[0].payload == {"from": "OrderStatusAgent", "to": "RouterAgent"}
+
+
+def test_order_status_move_to_router_is_refused_before_order_id_is_resolved(order_status_setup):
+    agent, ctx, state, log = order_status_setup
+    result = asyncio.run(agent.move_to_router(ctx))
+
+    assert isinstance(result, str)
+    assert "order_id" in result
+    assert state.stage is Stage.RESOLVE
+    assert not [e for e in log.events if e.type is EventType.AGENT_HANDOFF]
+
+
+def test_order_status_move_to_router_carries_the_base_persona(order_status_setup):
+    agent, ctx, state, _ = order_status_setup
+    state.slots.order_status.order_id = Slot.fill("52428")
+    router = asyncio.run(agent.move_to_router(ctx))
+
+    assert BASE in router.instructions
+
+
+def test_order_status_move_to_router_keeps_the_intent_active_for_re_entry(order_status_setup):
+    """Unlike move_to_wrap, this is a mid-call loop-back (PRD §5 'anything
+    else, <3 intents'): active_intent and intents_handled must survive the
+    handoff so a re-entry via set_intent is recognised as a revisit, not a
+    fresh intent against the cap."""
+    agent, ctx, state, _ = order_status_setup
+    state.slots.order_status.order_id = Slot.fill("52428")
+    asyncio.run(agent.move_to_router(ctx))
+
+    assert state.active_intent is Intent.ORDER_STATUS
+    assert Intent.ORDER_STATUS in state.intents_handled

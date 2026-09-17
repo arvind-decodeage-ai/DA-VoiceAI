@@ -89,6 +89,45 @@ class OrderStatusAgent(Agent):
             base_instructions=self._base_instructions, event_log=self._log
         )
 
+    @function_tool
+    async def move_to_router(self, ctx: RunContext[CallState]) -> "Agent | str":
+        """Move to finding out what else the customer needs, once this order
+        question is resolved but the customer has something else to discuss.
+
+        Call this instead of `move_to_wrap` when the customer says there is
+        something else, not when they are done.
+        """
+        # Approved decision (M4 plan, RouterAgent + set_intent slice, PRD §5
+        # flow: resolve -> "anything else, <3 intents" -> Router): a new tool,
+        # not a rename of move_to_wrap. "Done" and "something else" are two
+        # different customer answers that must reach two different
+        # destinations (Wrap vs. Router), so one tool can't serve both.
+        state = ctx.userdata
+        slots = state.slots.order_status
+        if not slots.issue_type.is_resolved:
+            slots.issue_type = Slot.mark_unavailable()
+
+        if not state.can_leave_stage():
+            missing = ", ".join(state.blocking_slots())
+            return (
+                f"Not yet — still missing: {missing}. Ask the customer for it "
+                f"first, then call this again."
+            )
+
+        # Deferred import: RouterAgent imports OrderStatusAgent (to hand off on
+        # set_intent), so importing RouterAgent at module level here would be
+        # circular.
+        from agents.router import NAME as ROUTER_NAME
+        from agents.router import RouterAgent
+
+        self._log.append(
+            EventType.AGENT_HANDOFF, {"from": NAME, "to": ROUTER_NAME}
+        )
+        state.stage = Stage.ROUTE
+        return RouterAgent(
+            base_instructions=self._base_instructions, event_log=self._log
+        )
+
 
 def _format_order_summary(order: dict[str, Any]) -> str:
     parts = [
