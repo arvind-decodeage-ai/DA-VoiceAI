@@ -332,12 +332,25 @@ def _date_query(created_at_min: Optional[str], created_at_max: Optional[str]) ->
     """Build a GraphQL search-query string from the same
     --created-at-min/--created-at-max CLI args REST used, translated to
     Shopify's query syntax (the GraphQL equivalent of REST's
-    created_at_min/created_at_max params)."""
+    created_at_min/created_at_max params).
+
+    Bug fixed 2026-09-18 (first real sync): the timestamp value MUST be
+    quoted. Confirmed live against both `orders` and `customers` --
+    unquoted, the colons inside an ISO-8601 timestamp (e.g.
+    "2026-09-18T09:07:36Z") confuse Shopify's search-query parser. For
+    `orders` this silently widened the match window (returned orders ~10.5
+    hours before the intended cutoff); for `customers` it was worse -- the
+    malformed filter was disregarded entirely and matched the whole table
+    (129,914 rows instead of the ~55 actually in range). No error was
+    raised either time -- a scope bug like this produces no failure signal,
+    which is exactly why it wasn't caught by a run's own success/failure
+    status.
+    """
     clauses = []
     if created_at_min:
-        clauses.append(f"created_at:>={created_at_min}")
+        clauses.append(f"created_at:>='{created_at_min}'")
     if created_at_max:
-        clauses.append(f"created_at:<={created_at_max}")
+        clauses.append(f"created_at:<='{created_at_max}'")
     return " AND ".join(clauses) if clauses else None
 
 

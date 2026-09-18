@@ -224,9 +224,26 @@ def test_money_bag_is_none_safe_for_nullable_moneybag_fields():
 
 
 def test_date_query_builds_the_graphql_search_syntax():
-    assert _date_query("2026-07-01", "2026-09-16") == "created_at:>=2026-07-01 AND created_at:<=2026-09-16"
-    assert _date_query("2026-07-01", None) == "created_at:>=2026-07-01"
+    assert _date_query("2026-07-01", "2026-09-16") == "created_at:>='2026-07-01' AND created_at:<='2026-09-16'"
+    assert _date_query("2026-07-01", None) == "created_at:>='2026-07-01'"
     assert _date_query(None, None) is None
+
+
+def test_date_query_quotes_a_full_iso_timestamp_value():
+    """The actual bug from the first real sync (2026-09-18): unquoted, the
+    colons inside an ISO-8601 timestamp confuse Shopify's search-query
+    parser -- confirmed live to silently widen an orders match window from
+    ~14 to 41 results, and to make Shopify disregard a customers filter
+    entirely (129,914 rows instead of ~55). This test asserts the quoting
+    itself, not just that dates "roughly" filter -- a value-only check on
+    real query results couldn't have caught this before it ran live."""
+    query = _date_query("2026-09-18T09:07:36Z", None)
+    assert query == "created_at:>='2026-09-18T09:07:36Z'"
+    # The value must be fully wrapped in quotes, not partially -- e.g. a
+    # bug that quoted only up to the first colon would still contain an
+    # unquoted colon-bearing fragment.
+    assert query.count("'") == 2
+    assert query.index("'") < query.index("2026-09-18T09:07:36Z") < query.rindex("'")
 
 
 # --------------------------------------------------------------------------
