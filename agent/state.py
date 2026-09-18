@@ -41,7 +41,7 @@ MAX_INTENTS_PER_CALL = 3
 # not a separate one. FORCE_WRAP_AFTER is kept as a single tunable constant
 # specifically so M6 changes the duration (3 min -> 8 min) without
 # restructuring should_force_wrap() or the forced-close flow it triggers.
-FORCE_WRAP_AFTER = timedelta(minutes=3)
+FORCE_WRAP_AFTER = timedelta(minutes=15)
 
 
 class Intent(str, Enum):
