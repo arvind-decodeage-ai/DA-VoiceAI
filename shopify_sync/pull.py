@@ -798,6 +798,27 @@ def pull_customers(
     created_at_min: Optional[str] = None,
     created_at_max: Optional[str] = None,
 ) -> tuple[int, Optional[datetime]]:
+    # KNOWN LIMITATION (confirmed live, 2026-09-18, second real sync):
+    # created_at_min/created_at_max have NO EFFECT here. Unlike `orders`
+    # (where the same _date_query() filter genuinely scopes the result --
+    # confirmed with an impossible future-date threshold correctly
+    # returning zero orders), `customers` silently ignores a `created_at`
+    # filter clause entirely -- the same impossible-future-date test still
+    # returned the full unfiltered table. This is not the _date_query()
+    # quoting bug (already fixed for orders): passing a completely
+    # non-existent, made-up field name to `customers(query:)` produces the
+    # identical "ignored" behavior, which means `created_at` is not a
+    # supported/indexed search field for this query at all -- a missing
+    # capability, not a syntax error, and not fixable by changing the query
+    # string. Every call to pull_customers() currently fetches the ENTIRE
+    # customer table (~130k rows at last count) regardless of these
+    # arguments. Deliberately left as-is for now -- does not block anything
+    # the voice agent currently needs -- pending its own investigate ->
+    # plan -> implement cycle. Likely real fix: `sortKey: CREATED_AT` (or
+    # UPDATED_AT) with `reverse: true` plus stopping pagination once a
+    # returned node's timestamp falls outside the requested window, since
+    # Shopify does support sorting customers even though it doesn't support
+    # this filter.
     count = 0
     high_water_mark: Optional[datetime] = None
     variables = {"first": CUSTOMERS_PAGE_SIZE, "query": _date_query(created_at_min, created_at_max)}
