@@ -1,9 +1,14 @@
-"""Tests for shopify_data.get_order and the lookup_order function_tool
-(M4 order-lookup slice — tasks 3-4 only, see shopify_data.py / agents/order_status.py).
+"""Tests for shopify_data.get_order()/get_order_detail() and the
+lookup_order/get_order_details function_tools (M4 order-lookup slice,
+extended by the REST->GraphQL migration's Step 5 narrow/wide payload
+rewrite).
 
-Exercised against a real Postgres, real `shopify.*` rows (no fixtures were
-added for this slice — it reads whatever shopify_sync.pull last populated),
-matching the no-mocked-database convention in test_call_json_api.py.
+Exercised against a real Postgres (migrate() run first) with known fake
+rows seeded directly by this file — not against whatever a live sync last
+populated, since no real GraphQL sync has run against this schema yet, and
+the old REST-synced rows don't carry the new display-enum/MoneyBag columns
+this rewrite reads. Matches the no-mocked-database convention used
+throughout this migration (test_shopify_pull.py, test_shopify_migrate.py).
 
 Run from the repository root:
 
@@ -15,7 +20,9 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from dotenv import load_dotenv
@@ -30,12 +37,26 @@ import psycopg  # noqa: E402
 from agents.order_status import OrderStatusAgent  # noqa: E402
 from agents.wrap import WrapAgent  # noqa: E402
 from events import EventLog, EventType  # noqa: E402
-from shopify_data import get_order  # noqa: E402
+from shopify_data import get_order, get_order_detail  # noqa: E402
+from shopify_sync.migrate import migrate  # noqa: E402
 from state import CallState, Intent, SlotStatus, Stage  # noqa: E402
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 NOT_A_REAL_ORDER_NUMBER = "not-a-real-order-number-xyz"
+
+# Fake ids in this file sit in this range, clear of any real Shopify id
+# (14+ digits) and clear of test_shopify_pull.py's 90xxxxxxxxx/80xxxxxxxxx
+# ranges. ON DELETE CASCADE from orders/customers cleans up every child row.
+_ORDER_ID = 91_000_000_001
+_ORDER_NUMBER = "91001"
+_CUSTOMER_ID = 81_000_000_001
+_LINE_ITEM_ID = 71_000_000_001
+_FULFILLMENT_ID = 41_000_000_001
+_REFUND_ID = 31_000_000_001
+_RETURN_ID = 21_000_000_001
+_RETURN_LINE_ITEM_ID = 11_000_000_001
+_SHIPPING_LINE_ID = 1_000_002
 
 
 def _db_reachable() -> bool:
@@ -63,44 +84,116 @@ class _Ctx:
 BASE = "BASE PERSONA TEXT"
 
 
+def _seed_full_order(conn: psycopg.Connection) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO shopify.customers (shopify_id, email, first_name, last_name)
+            VALUES (%s, 'seed@example.com', 'Seed', 'Customer')
+            """,
+            (_CUSTOMER_ID,),
+        )
+        cur.execute(
+            """
+            INSERT INTO shopify.orders
+                (shopify_id, order_number, customer_id, display_financial_status,
+                 display_fulfillment_status, total_price_shop_amount,
+                 total_price_shop_currency)
+            VALUES (%s, %s, %s, 'PAID', 'FULFILLED', %s, 'INR')
+            """,
+            (_ORDER_ID, _ORDER_NUMBER, _CUSTOMER_ID, Decimal("1606.00")),
+        )
+        cur.execute(
+            """
+            INSERT INTO shopify.order_line_items
+                (shopify_id, order_id, title, variant_title, sku, quantity, price)
+            VALUES (%s, %s, 'β-NMN', '250mg', 'NMN-250', 2, %s)
+            """,
+            (_LINE_ITEM_ID, _ORDER_ID, Decimal("803.00")),
+        )
+        cur.execute(
+            """
+            INSERT INTO shopify.fulfillments
+                (shopify_id, order_id, status, display_status, tracking_company,
+                 tracking_number, tracking_url)
+            VALUES (%s, %s, 'SUCCESS', 'DELIVERED', 'Blue Dart', 'BD123', 'https://track/BD123')
+            """,
+            (_FULFILLMENT_ID, _ORDER_ID),
+        )
+        cur.execute(
+            """
+            INSERT INTO shopify.refunds (shopify_id, order_id, note, amount)
+            VALUES (%s, %s, 'Customer requested', %s)
+            """,
+            (_REFUND_ID, _ORDER_ID, Decimal("250.50")),
+        )
+        cur.execute(
+            """
+            INSERT INTO shopify.returns (shopify_id, order_id, name, status)
+            VALUES (%s, %s, 'R1', 'OPEN')
+            """,
+            (_RETURN_ID, _ORDER_ID),
+        )
+        cur.execute(
+            """
+            INSERT INTO shopify.return_line_items (shopify_id, return_id, quantity)
+            VALUES (%s, %s, 1)
+            """,
+            (_RETURN_LINE_ITEM_ID, _RETURN_ID),
+        )
+        cur.execute(
+            """
+            INSERT INTO shopify.shipping_lines (shopify_id, order_id, title, source)
+            VALUES (%s, %s, 'Standard', 'shopify')
+            """,
+            (_SHIPPING_LINE_ID, _ORDER_ID),
+        )
+    conn.commit()
+
+
 @pytest.fixture
-def sample_order_number():
+def seeded_order():
+    migrate()
+    with psycopg.connect(DATABASE_URL) as conn:
+        _seed_full_order(conn)
+    yield _ORDER_NUMBER
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT order_number FROM shopify.orders LIMIT 1")
-            row = cur.fetchone()
-    if row is None:
-        pytest.skip("no shopify.orders rows present; run `python -m shopify_sync.pull` first")
-    return row[0]
+            cur.execute("DELETE FROM shopify.orders WHERE shopify_id = %s", (_ORDER_ID,))
+            cur.execute("DELETE FROM shopify.customers WHERE shopify_id = %s", (_CUSTOMER_ID,))
+        conn.commit()
 
 
-# --- shopify_data.get_order --------------------------------------------------
+# --- shopify_data.get_order (narrow, speech-shaped) --------------------------
 
 
-def test_get_order_returns_order_with_nested_related_data(sample_order_number):
+def test_get_order_returns_the_narrow_speech_shaped_payload(seeded_order):
     with psycopg.connect(DATABASE_URL) as conn:
-        order = get_order(conn, sample_order_number)
+        order = get_order(conn, seeded_order)
 
-    assert order is not None
-    assert order["order_number"] == sample_order_number
-    assert isinstance(order["line_items"], list)
-    assert isinstance(order["fulfillments"], list)
-    assert isinstance(order["refunds"], list)
+    assert order == {
+        "order_number": "91001",
+        "status_phrase": "paid and fulfilled",
+        "items": [{"title": "β-NMN", "quantity": 2}],
+        "tracking": {"carrier": "Blue Dart", "number": "BD123", "url": "https://track/BD123"},
+        "return_or_refund": "one refund of ₹250.50 issued; a return is open",
+        "total": "₹1,606.00",
+    }
 
 
-def test_get_order_line_items_belong_to_the_order(sample_order_number):
-    with psycopg.connect(DATABASE_URL) as conn:
-        order = get_order(conn, sample_order_number)
-
+def test_get_order_status_phrase_covers_legacy_fulfillment_enum_members(seeded_order):
+    """OPEN/PENDING_FULFILLMENT/RESTOCKED are marked legacy but still
+    returned by the API -- must still map to a real phrase, not fall
+    through to the raw enum string."""
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT count(*) FROM shopify.order_line_items WHERE order_id = %s",
-                (order["shopify_id"],),
+                "UPDATE shopify.orders SET display_fulfillment_status = %s WHERE shopify_id = %s",
+                ("RESTOCKED", _ORDER_ID),
             )
-            expected_count = cur.fetchone()[0]
-
-    assert len(order["line_items"]) == expected_count
+        conn.commit()
+        order = get_order(conn, seeded_order)
+    assert order["status_phrase"] == "paid and restocked"
 
 
 def test_get_order_not_found_returns_none():
@@ -109,39 +202,80 @@ def test_get_order_not_found_returns_none():
     assert order is None
 
 
+def test_get_order_with_no_tracking_or_refund_or_return_omits_them(seeded_order):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM shopify.fulfillments WHERE order_id = %s", (_ORDER_ID,))
+            cur.execute("DELETE FROM shopify.refunds WHERE order_id = %s", (_ORDER_ID,))
+            cur.execute("DELETE FROM shopify.return_line_items WHERE return_id = %s", (_RETURN_ID,))
+            cur.execute("DELETE FROM shopify.returns WHERE order_id = %s", (_ORDER_ID,))
+        conn.commit()
+        order = get_order(conn, seeded_order)
+
+    assert order["tracking"] is None
+    assert order["return_or_refund"] is None
+
+
+# --- shopify_data.get_order_detail (wide) -------------------------------------
+
+
+def test_get_order_detail_returns_every_column_and_nested_row(seeded_order):
+    with psycopg.connect(DATABASE_URL) as conn:
+        order = get_order_detail(conn, seeded_order)
+
+    assert order is not None
+    assert order["order_number"] == "91001"
+    assert order["display_financial_status"] == "PAID"
+    assert len(order["line_items"]) == 1
+    assert order["line_items"][0]["variant_title"] == "250mg"
+    assert len(order["fulfillments"]) == 1
+    assert order["fulfillments"][0]["display_status"] == "DELIVERED"
+    assert len(order["refunds"]) == 1
+    assert len(order["returns"]) == 1
+    assert order["returns"][0]["return_line_items"][0]["quantity"] == 1
+    assert len(order["shipping_lines"]) == 1
+    assert order["shipping_lines"][0]["source"] == "shopify"
+
+
+def test_get_order_detail_not_found_returns_none():
+    with psycopg.connect(DATABASE_URL) as conn:
+        assert get_order_detail(conn, NOT_A_REAL_ORDER_NUMBER) is None
+
+
 # --- lookup_order function_tool ----------------------------------------------
 
 
-def test_lookup_order_tool_fills_slot_and_returns_summary(sample_order_number):
+def test_lookup_order_tool_fills_slot_and_returns_the_narrow_summary(seeded_order):
     log = EventLog()
     state = CallState(call_id="c_test_order_lookup")
     agent = OrderStatusAgent(base_instructions=BASE, event_log=log)
 
-    result = asyncio.run(agent.lookup_order(_Ctx(state), sample_order_number))
+    result = asyncio.run(agent.lookup_order(_Ctx(state), seeded_order))
 
-    assert sample_order_number in result
-    assert "financial status" in result
-    assert state.slots.order_status.order_id.value == sample_order_number
+    assert seeded_order in result
+    assert "paid and fulfilled" in result
+    assert "Blue Dart" in result
+    assert state.slots.order_status.order_id.value == seeded_order
     assert state.slots.order_status.order_id.status == SlotStatus.FILLED
 
     slot_events = [e for e in log.events if e.type is EventType.SLOT_SET]
     assert len(slot_events) == 1
     assert slot_events[0].payload == {
         "slot": "order_id",
-        "value": sample_order_number,
+        "value": seeded_order,
         "by_agent": "OrderStatusAgent",
     }
 
 
-def test_lookup_order_tool_strips_leading_hash(sample_order_number):
+def test_lookup_order_tool_strips_leading_hash(seeded_order):
     log = EventLog()
     state = CallState(call_id="c_test_order_lookup_hash")
     agent = OrderStatusAgent(base_instructions=BASE, event_log=log)
 
-    result = asyncio.run(agent.lookup_order(_Ctx(state), f"#{sample_order_number}"))
+    result = asyncio.run(agent.lookup_order(_Ctx(state), f"#{seeded_order}"))
 
     assert "no order found" not in result.lower()
-    assert sample_order_number in result
+    assert seeded_order in result
     assert state.slots.order_status.order_id.status == SlotStatus.FILLED
 
 
@@ -192,3 +326,29 @@ def test_lookup_order_not_found_then_move_to_wrap_succeeds():
         "move_to_wrap refused with a string instead of handing off to Wrap "
         f"(got: {result!r})"
     )
+
+
+# --- get_order_details function_tool (wide drill-in) --------------------------
+
+
+def test_get_order_details_tool_returns_wide_detail(seeded_order):
+    log = EventLog()
+    state = CallState(call_id="c_test_order_detail")
+    agent = OrderStatusAgent(base_instructions=BASE, event_log=log)
+
+    result = asyncio.run(agent.get_order_details(_Ctx(state), seeded_order))
+
+    assert seeded_order in result
+    assert "NMN-250" in result  # sku, only in the wide payload
+    assert "Return R1" in result
+    assert "Shipping line: Standard" in result
+
+
+def test_get_order_details_tool_not_found():
+    log = EventLog()
+    state = CallState(call_id="c_test_order_detail_missing")
+    agent = OrderStatusAgent(base_instructions=BASE, event_log=log)
+
+    result = asyncio.run(agent.get_order_details(_Ctx(state), NOT_A_REAL_ORDER_NUMBER))
+
+    assert "no order found" in result.lower()

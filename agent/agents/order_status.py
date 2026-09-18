@@ -17,7 +17,7 @@ from agents.wrap import NAME as WRAP_NAME
 from agents.wrap import WrapAgent
 from config import get_settings
 from events import EventLog, EventType
-from shopify_data import get_order
+from shopify_data import get_order, get_order_detail
 from state import CallState, Slot, Stage
 
 NAME = "OrderStatusAgent"
@@ -64,6 +64,28 @@ class OrderStatusAgent(Agent):
             )
 
         return _format_order_summary(order)
+
+    @function_tool
+    async def get_order_details(self, ctx: RunContext[CallState], order_id: str) -> str:
+        """Look up the full detail behind an order already found with
+        lookup_order — exact SKUs, a return's individual line items, a
+        shipping line's source, and similar detail the spoken summary
+        doesn't cover. Call this only when the customer asks for something
+        `lookup_order`'s answer didn't already give you.
+
+        Args:
+            order_id: The same order number already looked up.
+        """
+        order_number = order_id.strip().lstrip("#")
+
+        settings = get_settings()
+        with psycopg.connect(settings.database_url, connect_timeout=5) as conn:
+            order = get_order_detail(conn, order_number)
+
+        if order is None:
+            return f"No order found with number {order_id}."
+
+        return _format_order_detail(order)
 
     @function_tool
     async def move_to_wrap(self, ctx: RunContext[CallState]) -> "Agent | str":
@@ -137,33 +159,72 @@ class OrderStatusAgent(Agent):
 
 
 def _format_order_summary(order: dict[str, Any]) -> str:
+    """Renders `shopify_data.get_order()`'s narrow, speech-shaped payload —
+    not raw columns. See that module for the display-enum -> wording
+    mapping and the currency-aware money formatting."""
+    parts = [f"Order {order['order_number']}: {order['status_phrase']}."]
+
+    items = order.get("items") or []
+    if items:
+        item_text = "; ".join(f"{i['quantity']}x {i['title']}" for i in items)
+        parts.append(f"Items: {item_text}.")
+
+    tracking = order.get("tracking")
+    if tracking:
+        parts.append(f"Tracking: {tracking['carrier'] or 'carrier'} {tracking['number']}.")
+    else:
+        parts.append("No tracking number on file yet.")
+
+    if order.get("return_or_refund"):
+        parts.append(order["return_or_refund"].capitalize() + ".")
+
+    if order.get("total"):
+        parts.append(f"Order total: {order['total']}.")
+
+    return " ".join(parts)
+
+
+def _format_order_detail(order: dict[str, Any]) -> str:
+    """Renders `shopify_data.get_order_detail()`'s wide payload — every
+    column, every nested row. For the drill-in tool only; not sent by
+    default (see `_format_order_summary`)."""
     parts = [
-        f"Order {order['order_number']}: financial status {order['financial_status']}, "
-        f"fulfillment status {order['fulfillment_status']}."
+        f"Order {order['order_number']} (id {order['shopify_id']}): "
+        f"{order['display_financial_status']} / {order['display_fulfillment_status']}."
     ]
 
     line_items = order.get("line_items") or []
     if line_items:
-        items = "; ".join(f"{li['quantity']}x {li['title']}" for li in line_items)
-        parts.append(f"Items: {items}.")
+        item_text = "; ".join(
+            f"{li['quantity']}x {li['title']}"
+            + (f" ({li['variant_title']})" if li.get("variant_title") else "")
+            + (f" sku {li['sku']}" if li.get("sku") else "")
+            for li in line_items
+        )
+        parts.append(f"Items: {item_text}.")
 
     fulfillments = order.get("fulfillments") or []
-    tracked = [f for f in fulfillments if f.get("tracking_number")]
-    if tracked:
-        tracking = "; ".join(
-            f"{f.get('tracking_company') or 'carrier'} {f['tracking_number']}"
-            for f in tracked
+    for f in fulfillments:
+        tracking = (
+            f", tracking {f.get('tracking_company') or 'carrier'} {f['tracking_number']}"
+            if f.get("tracking_number")
+            else ""
         )
-        parts.append(f"Tracking: {tracking}.")
-    elif fulfillments:
-        parts.append("Fulfillment exists but no tracking number is on file yet.")
-    else:
-        parts.append("Not yet fulfilled.")
+        parts.append(f"Fulfillment: {f.get('display_status') or f.get('status')}{tracking}.")
 
     refunds = order.get("refunds") or []
-    if refunds:
-        total = sum(r["amount"] for r in refunds if r.get("amount") is not None)
-        currency = order.get("currency") or ""
-        parts.append(f"{len(refunds)} refund(s) on this order totalling {total} {currency}".strip() + ".")
+    for r in refunds:
+        parts.append(f"Refund: {r.get('amount')} on {r.get('created_at')} ({r.get('note') or 'no note'}).")
+
+    returns = order.get("returns") or []
+    for ret in returns:
+        line_item_text = "; ".join(
+            f"{rli['quantity']}x return line item" for rli in ret.get("return_line_items") or []
+        )
+        parts.append(f"Return {ret['name']}: {ret['status']}." + (f" Items: {line_item_text}." if line_item_text else ""))
+
+    shipping_lines = order.get("shipping_lines") or []
+    for sl in shipping_lines:
+        parts.append(f"Shipping line: {sl.get('title')} (source: {sl.get('source')}).")
 
     return " ".join(parts)
